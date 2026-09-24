@@ -27,9 +27,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
 import _bootstrap  # noqa: F401
+import yaml
 
 from medortrace.common.config import REPO_ROOT, load_yaml
 from medortrace.eval.policy_search import DEFAULT_OBJECTIVE, CemConfig, CemSearch, load_base_weights

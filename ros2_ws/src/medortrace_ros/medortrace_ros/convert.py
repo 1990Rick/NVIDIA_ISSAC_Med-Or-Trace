@@ -20,9 +20,14 @@ Lidar (``sensor_msgs/PointCloud2`` via ``sensor_msgs_py``)
     ``range, dir_x, dir_y, dir_z`` (x, y, z = NaN for no-return rays) and,
     in simulation, ``gt_ghost`` / ``gt_object`` supervision fields.  Clouds
     from real drivers or the Isaac RTX helper only have x, y, z [, intensity,
-    ring]; directions and ranges are then derived from the points and, if a
-    scan pattern is configured, the missing rays of the pattern are filled in
-    as no-return rays (:func:`fill_no_return_rays`).
+    ring], at the sensor's native resolution (OR16: 16 x 1800 points per
+    scan) and without no-return rays.  With a scan pattern configured they are
+    re-binned onto the stack's (ring x azimuth) ray grid, nearest return per
+    cell and ``inf`` for empty cells (:func:`regrid_cloud`, which is
+    ``medortrace.isaac.sensors.grid_scan``, the binning ``IsaacBackend``
+    applies to the RTX cloud in-process).  The stack is sized for that grid
+    (OR16 rings x ``sensors.lidar.az_res_deg`` = 16 x 180 rays); every point
+    of a native-resolution cloud would cost it several control periods.
 """
 
 from __future__ import annotations
@@ -124,38 +129,62 @@ def lidar_to_columns(scan: LidarScan, include_gt: bool = True) -> dict[str, np.n
     return cols
 
 
-def fill_no_return_rays(directions: np.ndarray, ranges: np.ndarray, pattern: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Append the rays of a (rings x azimuth) scan pattern that produced no point as ``inf``-range rays.
+def pattern_elevations(pattern: dict) -> np.ndarray:
+    """Ring elevations [deg] of a scan pattern: ``rings`` equally spaced over ``[elev_min_deg, elev_max_deg]``.
 
-    ``pattern``: ``rings``, ``elev_min_deg``, ``elev_max_deg``, ``az_res_deg`` (same keys as the
-    ``sensors.lidar`` scenario config).  Returned rays whose elevation is off-pattern are kept as-is.
+    For the OR16 (16 rings, +-15 deg) these are the emitter elevations of configs/sensors/rtx_lidar_or16.json.
     """
     rings = int(pattern.get("rings", 16))
-    el0 = np.deg2rad(float(pattern.get("elev_min_deg", -15.0)))
-    el1 = np.deg2rad(float(pattern.get("elev_max_deg", 15.0)))
-    daz = np.deg2rad(float(pattern.get("az_res_deg", 2.0)))
-    n_az = int(round(2 * np.pi / daz))
-    el_grid = np.linspace(el0, el1, rings) if rings > 1 else np.array([0.5 * (el0 + el1)])
-    d_el = (el1 - el0) / max(rings - 1, 1)
-    occupied = np.zeros((rings, n_az), dtype=bool)
-    if len(directions):
-        el = np.arcsin(np.clip(directions[:, 2], -1.0, 1.0))
-        az = np.arctan2(directions[:, 1], directions[:, 0])
-        ri = np.clip(np.round((el - el0) / d_el).astype(int), 0, rings - 1) if rings > 1 else np.zeros(len(el), int)
-        on = np.abs(el - el_grid[ri]) <= 0.5 * d_el + 1e-6 if rings > 1 else np.ones(len(el), bool)
-        ai = np.round((az + np.pi) / daz).astype(int) % n_az
-        occupied[ri[on], ai[on]] = True
-    miss_r, miss_a = np.nonzero(~occupied)
-    if not len(miss_r):
-        return directions, ranges
-    E, A = el_grid[miss_r], -np.pi + miss_a * daz
-    d_new = np.stack([np.cos(E) * np.cos(A), np.cos(E) * np.sin(A), np.sin(E)], 1)
-    return np.vstack([directions, d_new]), np.concatenate([ranges, np.full(len(d_new), np.inf)])
+    el0, el1 = float(pattern.get("elev_min_deg", -15.0)), float(pattern.get("elev_max_deg", 15.0))
+    return np.linspace(el0, el1, rings) if rings > 1 else np.array([0.5 * (el0 + el1)])
+
+
+def resolve_lidar_pattern(pattern: dict | None, lidar_cfg: dict | None) -> dict | None:
+    """Fill the stack-side values of a scan pattern from the mission's ``sensors.lidar`` config.
+
+    ``rings`` / ``elev_*_deg`` describe the physical sensor and stay as configured; ``az_res_deg`` and
+    ``max_range`` <= 0 (or missing) mean "the stack's value", i.e. ``sensors.lidar.az_res_deg`` (2 deg) and
+    ``sensors.lidar.max_range`` (20 m), the values ``IsaacBackend`` bins the RTX cloud with.
+    """
+    if not pattern:
+        return None
+    lc = lidar_cfg or {}
+    out = dict(pattern)
+    if float(out.get("az_res_deg", 0.0) or 0.0) <= 0.0:
+        out["az_res_deg"] = float(lc.get("az_res_deg", 2.0))
+    if float(out.get("max_range", 0.0) or 0.0) <= 0.0:
+        out["max_range"] = float(lc.get("max_range", 20.0))
+    return out
+
+
+def pattern_ray_count(pattern: dict) -> int:
+    return len(pattern_elevations(pattern)) * int(round(360.0 / float(pattern.get("az_res_deg", 2.0))))
+
+
+def regrid_cloud(xyz: np.ndarray, intensity: np.ndarray | None, pattern: dict):
+    """Bin a sensor-frame cloud onto the pattern's (ring x azimuth) ray grid, nearest return per cell.
+
+    Returns ``(points, intensity, ring, directions (R,3), ranges (R,), src (R,))`` in the layout of
+    ``medortrace.isaac.sensors.grid_scan`` (``R`` = :func:`pattern_ray_count`, ``ranges = inf`` for cells
+    without a return, ``intensity`` scaled to <= 1); ``src`` is the index into ``xyz`` of the point kept
+    for each ray (-1 for none), for carrying per-point fields over.
+    """
+    from medortrace.isaac.sensors import grid_scan  # pure numpy (imports without Isaac Sim)
+
+    xyz = np.asarray(xyz, float).reshape(-1, 3)
+    max_range = float(pattern.get("max_range", 0.0) or 0.0)
+    return grid_scan(xyz, intensity, pattern_elevations(pattern), float(pattern.get("az_res_deg", 2.0)),
+                     max_range if max_range > 0 else np.inf, np.arange(len(xyz)))
 
 
 def lidar_from_columns(cols: dict[str, np.ndarray], header: Header, sensor_height: float = 0.9,
                        pattern: dict | None = None, min_range: float = 0.05) -> LidarScan:
-    """Column dict (from any PointCloud2 layout) -> LidarScan (sensor frame)."""
+    """Column dict (from any PointCloud2 layout) -> LidarScan (sensor frame).
+
+    The per-ray layout (``range, dir_*``) is taken as is.  An x, y, z cloud is re-binned onto ``pattern``
+    (:func:`regrid_cloud`) when one is given (resolve its stack-side values with
+    :func:`resolve_lidar_pattern`); without a pattern every point becomes a ray and no-return rays are lost.
+    """
     names = set(cols)
     ghost = cols["gt_ghost"].astype(bool) if "gt_ghost" in names else None
     obj = cols["gt_object"].astype(np.int64) if "gt_object" in names else None
@@ -171,27 +200,31 @@ def lidar_from_columns(cols: dict[str, np.ndarray], header: Header, sensor_heigh
         dist = np.linalg.norm(xyz, axis=1)
         ok = np.isfinite(dist) & (dist >= min_range)
         xyz, dist = xyz[ok], dist[ok]
-        dirs = xyz / dist[:, None]
-        rng = dist
-        inten_all = cols["intensity"][ok].astype(float) if "intensity" in names else np.ones(len(rng))
-        ring_all = cols[ring_name][ok].astype(np.int64) if ring_name else None
+        inten = cols["intensity"][ok].astype(float) if "intensity" in names else None
         ghost = ghost[ok] if ghost is not None else None
         obj = obj[ok] if obj is not None else None
+        if pattern:
+            pts, inten_g, ring_g, dirs, rng, src = regrid_cloud(xyz, inten, pattern)
+            hit = src >= 0
+            if ghost is not None:
+                g = np.zeros(len(rng), bool)
+                g[hit] = ghost[src[hit]]
+                ghost = g
+            if obj is not None:
+                o = np.full(len(rng), -1, np.int64)
+                o[hit] = obj[src[hit]]
+                obj = o
+            return LidarScan(header, pts, inten_g, ring_g, dirs, rng, sensor_height=float(sensor_height),
+                             gt_is_ghost=ghost, gt_object_id=obj)
+        dirs = xyz / dist[:, None]
+        rng = dist
+        inten_all = inten if inten is not None else np.ones(len(rng))
+        ring_all = cols[ring_name][ok].astype(np.int64) if ring_name else None
     if ring_all is None:
         el = np.arcsin(np.clip(dirs[:, 2], -1, 1))
         n_r = int((pattern or {}).get("rings", 16))
         ring_all = (np.digitize(el, np.linspace(el.min() - 1e-6, el.max() + 1e-6, n_r + 1)) - 1
                     if len(el) else np.zeros(0, np.int64))
-    if pattern:
-        n0 = len(rng)
-        dirs, rng = fill_no_return_rays(dirs, rng, pattern)
-        pad = len(rng) - n0
-        if ghost is not None:
-            ghost = np.concatenate([ghost, np.zeros(pad, bool)])
-        if obj is not None:
-            obj = np.concatenate([obj, np.full(pad, -1, np.int64)])
-        inten_all = np.concatenate([inten_all, np.zeros(pad)])
-        ring_all = np.concatenate([ring_all, np.zeros(pad, np.int64)])
     fin = np.isfinite(rng)
     return LidarScan(header, dirs[fin] * rng[fin, None], inten_all[fin], ring_all[fin], dirs, rng,
                      sensor_height=float(sensor_height), gt_is_ghost=ghost, gt_object_id=obj)

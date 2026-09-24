@@ -187,11 +187,12 @@ class IterationRecord:
     sigma: dict[str, float]
     n_errors: int
     wall_s: float
+    has_incumbent: bool = True              # cand_0 is the pre-update mean (include_mean)
 
     def summary(self) -> dict:
         j = np.asarray(self.objectives)
         return {"iteration": self.iteration, "best": float(j.max()), "mean": float(j.mean()),
-                "elite_mean": float(j[self.elite].mean()), "incumbent": float(j[0]),
+                "elite_mean": float(j[self.elite].mean()), "incumbent": float(j[0]) if self.has_incumbent else None,
                 "n_errors": self.n_errors, "wall_s": round(self.wall_s, 2)}
 
 
@@ -309,7 +310,8 @@ class CemSearch:
                                        "split": e.split, "family": e.family} for e in entries],
                 candidates=cands, objectives=[float(x) for x in Jm], objective_std=[float(x) for x in J.std(axis=1)],
                 per_episode=J.tolist(), elite=elite, mu=dict(zip(self.keys, map(float, mu))),
-                sigma=dict(zip(self.keys, map(float, sigma))), n_errors=n_err, wall_s=time.time() - t0)
+                sigma=dict(zip(self.keys, map(float, sigma))), n_errors=n_err, wall_s=time.time() - t0,
+                has_incumbent=cfg.include_mean)
             history.append(rec)
             i_best = elite[0]
             if Jm[i_best] > best["objective"]:
@@ -341,8 +343,9 @@ class CemSearch:
 
     def _log_iteration(self, rec: IterationRecord, rows: list[dict]) -> None:
         s = rec.summary()
+        inc = f"{s['incumbent']:.3f}" if s["incumbent"] is not None else "n/a"
         self.log(f"[cem] iter {rec.iteration + 1}: best={s['best']:.3f} mean={s['mean']:.3f} "
-                 f"incumbent={s['incumbent']:.3f} elite={['cand_%d' % i for i in rec.elite]} "
+                 f"incumbent={inc} elite={['cand_%d' % i for i in rec.elite]} "
                  f"errors={rec.n_errors} ({rec.wall_s:.1f}s)")
         if not self.out:
             return

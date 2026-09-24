@@ -26,6 +26,7 @@ VARIANTS = {
     "no_temporal_model": {"autonomy": {"use_temporal_model": False}},
     "deterministic_map": {"autonomy": {"deterministic_map": True}},
     "no_time_sync": {"autonomy": {"use_time_sync": False}},
+    "no_scan_matching": {"autonomy": {"use_scan_matching": False}},
     "no_safety_supervisor": {"autonomy": {"use_safety_supervisor": False}},
     "no_abstention": {"cfg": {"verifier": {"require_direct_evidence": False, "tau_verify": 0.5, "tau_refute": 0.5}}},
 }
@@ -43,10 +44,26 @@ a = ap.parse_args()
 
 reg = load_registry(a.registry)
 sel = select(reg, a.family, a.split)
-# stratify: spread the limit over families
-fams = sorted({e.family for e in sel})
-per = max(1, a.limit // max(len(fams), 1))
-sel = [e for f in fams for e in [x for x in sel if x.family == f][:per]]
+# stratify: spread the limit over strata (each stress family; each counterfactual
+# factor, taking whole matched pairs so both arms of a pair are always present)
+
+
+def _stratum(e) -> str:
+    return e.family if e.family != "counterfactual" else (e.pair_id or "cf").split("/")[0]
+
+
+strata = sorted({_stratum(e) for e in sel})
+per = max(1, a.limit // max(len(strata), 1))
+picked = []
+for s_ in strata:
+    es = [x for x in sel if _stratum(x) == s_]
+    if es and es[0].pair_id:
+        pairs = sorted({x.pair_id for x in es})[: max(1, per // 2)]
+        picked += [x for x in es if x.pair_id in pairs]
+    else:
+        picked += es[:per]
+sel = picked
+print(f"{len(sel)} scenarios x {len(a.variants)} variants")
 out = Path(a.out)
 out.mkdir(parents=True, exist_ok=True)
 run_batch(sel, ("active",), {k: VARIANTS[k] for k in a.variants}, workers=a.workers,
@@ -59,11 +76,17 @@ for v in a.variants:
         continue
     d = paired_delta(rows, v, "full", key="variant")
     report[v] = d
-    md += [f"## {v} (n={d['n_pairs']})", "", "| metric | delta | 95% CI | p_boot | variant better |", "|---|---|---|---|---|"]
+    md += [
+        f"## {v} (n={d['n_pairs']})",
+        "",
+        "| metric | delta | 95% CI | p_boot | variant better |",
+        "|---|---|---|---|---|",
+    ]
     for m in PRIMARY + SECONDARY + SAFETY:
         x = d.get(m)
         if x:
-            md.append(f"| {m} | {x['delta']:.4f} | [{x['ci95'][0]:.4f}, {x['ci95'][1]:.4f}] | {x['p_boot']:.3f} | {x['a_better']} |")
+            ci = f"[{x['ci95'][0]:.4f}, {x['ci95'][1]:.4f}]"
+            md.append(f"| {m} | {x['delta']:.4f} | {ci} | {x['p_boot']:.3f} | {x['a_better']} |")
     md.append("")
 (out / "ablation.json").write_text(json.dumps(report, indent=1))
 (out / "ablation.md").write_text("\n".join(md))

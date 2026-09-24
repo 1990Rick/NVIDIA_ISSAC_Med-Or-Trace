@@ -6,7 +6,13 @@
 #     the assembler only ever uses the newest message, and best-effort subscribers accept both
 #     best-effort and reliable driver publishers;
 #   * verdicts and provenance are RELIABLE / TRANSIENT_LOCAL with a deep history: they are the audit
-#     record, must not be dropped, and late joiners (OR dashboard, audit logger) must receive the history;
+#     record and must not be dropped.  A late joiner (OR dashboard, audit logger) receives the newest `depth`
+#     events.  Provenance runs at ~17 events/s nominal (up to ~40/s), so its depth (20000) holds a complete
+#     default case (180 s: ~3000 events) with margin, ~20 min at the nominal rate.  Longer cases leave late
+#     joiners a suffix, verified with records.verify_provenance_stream(anchor=... | allow_suffix=True); the
+#     complete chain is the autonomy node's audit export (audit_dir) or a recording started with the mission.
+#     Bounded KEEP_LAST rather than KEEP_ALL keeps publisher memory bounded (~0.5 kB/event) and never blocks
+#     the control loop on DDS resource limits;
 #   * mission and current state (safety state, beliefs, maps) are RELIABLE / TRANSIENT_LOCAL depth 1:
 #     a late joiner immediately gets the latest value (latched-topic semantics);
 #   * commands are RELIABLE / VOLATILE depth 1: compatible with both reliable and best-effort subscribers
@@ -27,3 +33,4 @@ profiles:
 overrides:
   imu: {depth: 50}                 # 10 samples per 0.1 s control tick must survive one missed spin
   workflow: {depth: 1000}          # full case record for a late-joining autonomy node
+  provenance: {depth: 20000}       # ~17 (up to ~40) events/s x case length; see the rationale above

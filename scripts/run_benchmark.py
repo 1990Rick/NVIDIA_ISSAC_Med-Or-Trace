@@ -42,7 +42,7 @@ if a.limit_per_family:
         key = e.family if e.family != "counterfactual" else (e.pair_id or "").split("/")[0]
         per[key].append(e)
     sel = []
-    for key, es in per.items():
+    for es in per.values():
         if es and es[0].pair_id:
             pairs = sorted({e.pair_id for e in es})[: a.limit_per_family]
             sel += [e for e in es if e.pair_id in pairs]
@@ -62,11 +62,17 @@ md = ["# MED-OR-TRACE benchmark summary", "", "## Primary metrics", markdown_tab
 for base in [p for p in a.policies if p != "active"]:
     if "active" in a.policies:
         d = paired_delta(rows, "active", base)
-        md += ["", f"## Paired delta: active - {base} (n={d['n_pairs']})", "", "| metric | delta | 95% CI | p_boot | active better |",
-               "|---|---|---|---|---|"]
+        md += [
+            "",
+            f"## Paired delta: active - {base} (n={d['n_pairs']})",
+            "",
+            "| metric | delta | 95% CI | p_boot | active better |",
+            "|---|---|---|---|---|",
+        ]
         for m in PRIMARY + SECONDARY + SAFETY:
             v = d.get(m)
             if v:
-                md.append(f"| {m} | {v['delta']:.4f} | [{v['ci95'][0]:.4f}, {v['ci95'][1]:.4f}] | {v['p_boot']:.3f} | {v['a_better']} |")
+                ci = f"[{v['ci95'][0]:.4f}, {v['ci95'][1]:.4f}]"
+                md.append(f"| {m} | {v['delta']:.4f} | {ci} | {v['p_boot']:.3f} | {v['a_better']} |")
 (out / "summary.md").write_text("\n".join(md) + "\n")
 print((out / "summary.md").read_text())

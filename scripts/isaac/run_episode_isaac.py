@@ -20,7 +20,8 @@ subscriber).  Use ``ros2_sim.py`` for an externally driven robot.
 
 With ``--export DIR``: ``DIR/episodes/<scenario>__s<seed>__<policy>/`` (dataset schema of
 ``medortrace.data.writer``, ``meta.json:backend = "isaac"``), ``DIR/usd/`` (authored stage + rig) and
-``DIR/isaac_run.json`` (resolved extensions, sensor annotators/commands, metrics).
+``DIR/isaac_run.json`` (resolved extensions, sensor annotators/commands, requested vs resolved RTX profiles,
+sensor warnings, reflective-fault material edits, metrics).
 """
 from __future__ import annotations
 
@@ -68,7 +69,11 @@ def main(argv=None) -> int:
         info: dict = {}
 
         def record(be) -> None:
-            info["sensors"] = {k: getattr(be, k).backend_info for k in ("lidar", "radar", "camera", "acoustic")}
+            # backend_info dicts are live: per-frame counters (e.g. radar doppler_frames) are final at export
+            info["sensors"] = {k: getattr(getattr(be, k, None), "backend_info", None)
+                               for k in ("lidar", "radar", "camera", "acoustic")}
+            info["sensor_warnings"] = list(be.sensor_warnings)
+            info["reflective_faults"] = be.reflective_faults
             info["nonvisual_fixes"] = be.nonvisual_fixes
             info["usd"] = str(be.scene_path)
             info["articulation_root"] = be.base_path

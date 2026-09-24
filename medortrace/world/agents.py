@@ -123,7 +123,9 @@ class StaffPopulation:
                     continue
                 d = a.pos - b.pos
                 dist = np.linalg.norm(d) + 1e-9
-                f = f + self.A * np.exp((a.spec.radius + b.spec.radius - dist) / self.B) * d / dist * (0.3 if not a.spec.roaming else 1.0)
+                f = f + self.A * np.exp((a.spec.radius + b.spec.radius - dist) / self.B) * d / dist * (
+                    0.3 if not a.spec.roaming else 1.0
+                )
             # obstacle repulsion (roaming only; sterile staff hold position)
             if a.spec.roaming:
                 for bx in self._boxes:

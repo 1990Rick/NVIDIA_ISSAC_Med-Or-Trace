@@ -1,5 +1,13 @@
 """Episode runner: backend <-> autonomy stack loop, simulated operator,
-truth logging, metrics and dataset export."""
+truth logging, metrics and dataset export.
+
+``sim_overrides`` (sim-to-real sensitivity) is deep-merged into the config
+seen by ``build_episode`` and the backend *only*: it perturbs the world (sensor
+physics, staff behaviour, robot dynamics, workflow realism), while the autonomy
+stack keeps the unperturbed config because its sensor / motion models encode
+what the robot *believes* the world to be.  The episode's workflow protocol
+(claim deadlines) is part of the world and is read from the episode.
+"""
 
 from __future__ import annotations
 
@@ -66,7 +74,8 @@ def make_backend(name: str, cfg: dict):
 
 def run_episode(cfg: dict, seed: int, backend: str = "lite", out_dir: str | Path | None = None,
                 policy: str | None = None, duration: float | None = None, save_raw: bool = False,
-                autonomy_override: dict | None = None, verbose: bool = False) -> EpisodeResult:
+                autonomy_override: dict | None = None, verbose: bool = False,
+                sim_overrides: dict | None = None) -> EpisodeResult:
     t_wall = time.time()
     if policy:
         cfg = deep_merge(cfg, {"autonomy": {"policy": policy}})
@@ -75,8 +84,9 @@ def run_episode(cfg: dict, seed: int, backend: str = "lite", out_dir: str | Path
     if duration:
         cfg = deep_merge(cfg, {"episode": {"duration_s": float(duration)}})
     cfg = deep_merge(cfg, {"_policy_seed": int(seed) * 7919 + 17})
-    ep = build_episode(cfg, seed)
-    be = make_backend(backend, cfg)
+    sim_cfg = deep_merge(cfg, sim_overrides) if sim_overrides else cfg   # world only; the stack keeps ``cfg``
+    ep = build_episode(sim_cfg, seed)
+    be = make_backend(backend, sim_cfg)
     bundle = be.reset(ep)
     stack = AutonomyStack(stack_inputs_from_episode(ep), cfg)
     op = SimulatedOperator(ep.streams.fork("robot", "operator"))

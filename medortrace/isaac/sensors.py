@@ -11,8 +11,8 @@ Lidar              RTX lidar (``IsaacSensorCreateRtxLidar``),     custom profile
                    ``...CreateRTXLidarScanBuffer`` annotator      configs/sensors/rtx_lidar_or16.json
 Camera             RTX render product + Replicator annotators     RGB, semantic/instance seg., depth,
                    (rgb, semantic_segmentation, bbox2d, depth)    2D boxes -> detector adapter
-Radar              RTX radar (``IsaacSensorCreateRtxRadar``) +    Doppler point cloud
-                   radar point-cloud annotator
+Radar              RTX radar (``IsaacSensorCreateRtxRadar``) +    Doppler point cloud (5.x: cartesian
+                   radar point-cloud annotator                    extractor + GenericModelOutput)
 Acoustic           PhysX scene-query echo model (an RTX acoustic  same AcousticEcho contract
                    prim is created when the experimental
                    extension exists, for visualisation only)
@@ -44,11 +44,40 @@ tries the known names in order and reports which one it used
 (``adapter.backend_info``).  ``scripts/isaac/validate_sensor_configs.py``
 prints the resolved configuration.  Everything above the adapter classes is
 numpy/pxr only and unit-testable outside Isaac Sim.
+
+Isaac Sim 5.x specifics (``isaacsim.sensors.rtx`` >= 15.0):
+
+* **Profiles.**  ``IsaacSensorCreateRtx{Lidar,Radar}`` create ``OmniLidar`` /
+  ``OmniRadar`` prims and match ``config`` only against NVIDIA's shipped sensor
+  USDs; a custom JSON profile is dropped with a log warning and the default
+  model is created.  Only the (deprecated) camera-prim path
+  (``force_camera_prim=True``) still writes ``sensorModelConfig``, so the
+  adapters request it when the command supports it, read the resolved model back
+  from the created prim (:func:`sensor_config_info`) and report
+  ``profile_requested`` / ``profile_resolved`` / ``profile_applied`` plus a
+  warning when they differ.  The lidar ring grid then follows the prim's own
+  emitter elevations (:func:`prim_lidar_elevations`) instead of the JSON's.
+* **Radar.**  The 4.x radar point-cloud annotators (Doppler and RCS per return)
+  were removed; the generic ``IsaacExtractRTXSensorPointCloudNoAccumulator``
+  outputs cartesian points only.  Radial velocity and RCS are then decoded from
+  the ``GenericModelOutput`` buffer (:func:`gmo_radar_fields`, host buffers
+  only) or reported as 0, and ``backend_info["doppler_frames"]`` counts which
+  source each frame used.
+* **Frames.**  ``OmniLidar``/``OmniRadar`` prims get
+  ``omni:sensor:Core:outputFrameOfReference = SENSOR`` so point clouds are
+  sensor-frame, as the 4.x ``transformPoints=False`` initialisation requested.
+
+The episode fault model's *reflective* faults (``specular_gain``,
+``floor_wet``) are material edits here, not sensor noise:
+:func:`apply_reflective_faults` rewrites the opened stage the way
+``sensors_lite.simulate_lidar`` rescales specularity, so a ``reflective``
+registry entry is the same experiment on both backends.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -70,12 +99,21 @@ from medortrace.common.msgs import (
 )
 from medortrace.isaac.compat import contact_sensor_cls, imu_sensor_cls
 from medortrace.sim.sensors_lite import CLASSES, SIMILARITY
+from medortrace.world.materials import Material
 
 LIDAR_COMMANDS = ["IsaacSensorCreateRtxLidar"]
 RADAR_COMMANDS = ["IsaacSensorCreateRtxRadar"]
 ACOUSTIC_COMMANDS = ["IsaacSensorCreateRtxAcoustic", "IsaacSensorCreateAcoustic"]
 LIDAR_ANNOTATORS = ["IsaacCreateRTXLidarScanBuffer", "RtxSensorCpuIsaacCreateRTXLidarScanBuffer"]
-RADAR_ANNOTATORS = ["IsaacComputeRTXRadarPointCloud", "RtxSensorCpuIsaacComputeRTXRadarPointCloud"]
+# Radar: the 4.x point-cloud annotators (Doppler + RCS per return) are preferred where they exist; Isaac Sim 5.x
+# (isaacsim.sensors.rtx 15.0) removed them in favour of the generic cartesian-only extractor.
+RADAR_ANNOTATORS = ["IsaacComputeRTXRadarPointCloud", "RtxSensorCpuIsaacComputeRTXRadarPointCloud",
+                    "IsaacExtractRTXSensorPointCloudNoAccumulator"]
+CARTESIAN_ONLY_ANNOTATORS = ("IsaacExtractRTXSensorPointCloudNoAccumulator",)
+GMO_ANNOTATORS = ["GenericModelOutput"]          # raw sensor buffer: {"gmoBufferPointer", "gmoDeviceIndex"}
+# 5.x OmniLidar / OmniRadar prim attributes (names as used by isaacsim.sensors.rtx 15.x tests)
+OUTPUT_FRAME_ATTR = "omni:sensor:Core:outputFrameOfReference"
+OMNI_LIDAR_ELEVATION_ATTRS = ("omni:sensor:Core:emitterState:s001:elevationDeg",)
 ROBOT_PRIM = "/World/Robot"
 
 # RTX non-visual material vocabulary (Omniverse SimReady non-visual material spec as documented for
@@ -135,6 +173,97 @@ def normalize_nonvisual_tokens(stage) -> list[dict]:
     return [r for r in nonvisual_report(stage, fix=True) if r["fixed"]]
 
 
+# -- reflective faults (FaultModel.specular_gain / floor_wet) as material edits -----------------------------
+SPECULAR_MAX = 0.98            # simulate_lidar clips the specular weight here
+CLEARCOAT_FROM = 0.5           # gained specularity from which the RTX non-visual coating becomes a clear coat
+WET_FLOOR_SPECULARITY = 0.6    # simulate_lidar: floor specular weight >= 0.6 when wet
+WET_FLOOR_ROUGHNESS = 0.05     # water film: near-mirror visual roughness
+_CLEARCOAT = {"none": "clearcoat", "paint": "paint_clearcoat"}
+
+
+def reflective_material_edits(materials: dict[str, Material], specular_gain: float = 1.0, floor_wet: bool = False,
+                              floor_material: str = "floor_vinyl") -> tuple[dict[str, Material], Material | None]:
+    """The lite simulator's reflective faults expressed as material changes (pure).
+
+    ``simulate_lidar`` multiplies every material's specular weight by ``specular_gain`` (zero stays zero, clipped
+    at 0.98) and, on a wet floor, raises the floor's weight to at least 0.6.  RTX has no specular-weight knob, so
+    the same change is mapped onto what RTX renders and ray-traces: visual roughness is divided by the gain
+    (floor 0.02), and a material whose gained weight reaches :data:`CLEARCOAT_FROM` gets a clear-coat non-visual
+    coating (mirror-like lidar/radar returns).  The wet floor is a *separate* material (``<floor>_wet``: roughness
+    <= 0.05, clear coat) so nothing else bound to the floor material turns wet.
+
+    Returns ``(edited materials by name, wet floor material or None)``; unchanged materials are omitted.
+    """
+    g = float(specular_gain)
+    edited: dict[str, Material] = {}
+    if g != 1.0:
+        for name, m in materials.items():
+            if m.specularity <= 0.0:
+                continue
+            s = float(min(SPECULAR_MAX, m.specularity * g))
+            coat = _CLEARCOAT.get(m.nonvisual_coating, m.nonvisual_coating) if g > 1.0 and s >= CLEARCOAT_FROM \
+                else m.nonvisual_coating
+            edited[name] = replace(m, specularity=s, roughness=float(np.clip(m.roughness / g, 0.02, 1.0)),
+                                   nonvisual_coating=coat)
+    wet = None
+    if floor_wet and floor_material in materials:
+        f = edited.get(floor_material, materials[floor_material])
+        wet = replace(f, name=f"{f.name}_wet", specularity=max(f.specularity, WET_FLOOR_SPECULARITY),
+                      roughness=min(f.roughness, WET_FLOOR_ROUGHNESS),
+                      nonvisual_coating=_CLEARCOAT.get(f.nonvisual_coating, f.nonvisual_coating))
+    return edited, wet
+
+
+def _set_appearance(stage, path: str, m: Material) -> None:
+    """Write roughness / specularity / non-visual coating of ``m`` into an authored scene-builder material."""
+    from pxr import Sdf, UsdShade
+    prev = UsdShade.Shader(stage.GetPrimAtPath(f"{path}/PreviewSurface"))
+    mdl = UsdShade.Shader(stage.GetPrimAtPath(f"{path}/MDL"))
+    for sh, names in ((prev, ("roughness",)), (mdl, ("reflection_roughness_constant", "frosting_roughness"))):
+        for n in names:
+            i = sh.GetInput(n) if sh else None
+            if i:
+                i.Set(float(m.roughness))
+    p = stage.GetPrimAtPath(path)
+    p.CreateAttribute("medortrace:specularity", Sdf.ValueTypeNames.Float).Set(float(m.specularity))
+    p.CreateAttribute("omni:simready:nonvisual:coating", Sdf.ValueTypeNames.Token).Set(m.nonvisual_coating)
+
+
+def apply_reflective_faults(stage, materials: dict[str, Material], specular_gain: float = 1.0,
+                            floor_wet: bool = False, floor_prim: str = "/World/Room/Floor",
+                            floor_material: str = "floor_vinyl") -> list[dict]:
+    """Apply :func:`reflective_material_edits` to an opened scene-builder stage (in memory; the file is untouched).
+
+    Gained materials are edited in place under ``/World/Looks``; the wet floor is authored as a new material and
+    bound to ``floor_prim`` for all purposes except physics (friction stays that of the dry floor, as in the lite
+    simulator).  Returns one audit row per change (recorded in ``isaac_run.json`` / frame labels).
+    """
+    from pxr import UsdShade
+
+    from medortrace.usd.scene_builder import make_material, safe
+    edited, wet = reflective_material_edits(materials, specular_gain, floor_wet, floor_material)
+    rows = []
+    for name, m in sorted(edited.items()):
+        path = f"/World/Looks/{safe(name)}"
+        if not stage.GetPrimAtPath(path).IsValid():
+            continue
+        _set_appearance(stage, path, m)
+        old = materials[name]
+        rows.append({"material": path, "fault": "specular_gain", "gain": float(specular_gain),
+                     "specularity": [old.specularity, m.specularity], "roughness": [old.roughness, m.roughness],
+                     "coating": [old.nonvisual_coating, m.nonvisual_coating]})
+    fl = stage.GetPrimAtPath(floor_prim)
+    if wet is not None and fl.IsValid():
+        path = f"/World/Looks/{safe(wet.name)}"
+        mat = make_material(stage, path, wet)
+        UsdShade.MaterialBindingAPI.Apply(fl).Bind(mat)       # all-purpose binding; the physics binding is kept
+        old = materials[floor_material]
+        rows.append({"material": path, "fault": "floor_wet", "bound_to": floor_prim, "from": floor_material,
+                     "specularity": [old.specularity, wet.specularity], "roughness": [old.roughness, wet.roughness],
+                     "coating": [old.nonvisual_coating, wet.nonvisual_coating]})
+    return rows
+
+
 def lidar_elevations(profile_path: str | Path) -> np.ndarray:
     """Emitter elevations (deg, sorted) of an RTX lidar JSON profile."""
     prof = json.loads(Path(profile_path).read_text())["profile"]
@@ -144,6 +273,46 @@ def lidar_elevations(profile_path: str | Path) -> np.ndarray:
         n = int(prof.get("numberOfEmitters", 16))
         el = np.linspace(prof.get("downElevationDeg", -15.0), prof.get("upElevationDeg", 15.0), n)
     return np.sort(el)
+
+
+def prim_lidar_elevations(prim) -> np.ndarray | None:
+    """Distinct emitter elevations (deg, sorted) authored on a 5.x ``OmniLidar`` prim, or None."""
+    for name in OMNI_LIDAR_ELEVATION_ATTRS:
+        a = prim.GetAttribute(name)
+        v = a.Get() if a and a.IsValid() else None
+        if v is not None and len(v):
+            el = np.asarray(v, float).reshape(-1)
+            el = el[np.isfinite(el)]
+            if len(el):
+                return np.unique(el)
+    return None
+
+
+def sensor_config_info(prim, requested: str) -> dict:
+    """Which sensor model a created RTX sensor prim actually carries (pxr only).
+
+    Camera-prim sensors (4.x, 5.x ``force_camera_prim``) name their JSON profile in ``sensorModelConfig``.  5.x
+    ``OmniLidar``/``OmniRadar`` prims hold the model as ``omni:sensor:*`` attributes and never reference a custom
+    JSON profile, so there the requested profile was *not* applied.
+    """
+    type_name = str(prim.GetTypeName())
+    a = prim.GetAttribute("sensorModelConfig")
+    cfg = a.Get() if a and a.IsValid() else None
+    resolved = str(cfg) if cfg else f"<{type_name or 'untyped'} default model>"
+    return {"prim_type": type_name, "profile_requested": requested, "profile_resolved": resolved,
+            "profile_applied": bool(cfg) and Path(str(cfg)).stem == Path(requested).stem}
+
+
+def set_output_frame_sensor(prim) -> str | None:
+    """Ask a 5.x OmniSensor prim for sensor-frame point clouds; returns the resulting value (None: no such attr)."""
+    a = prim.GetAttribute(OUTPUT_FRAME_ATTR)
+    if not (a and a.IsValid()):
+        return None
+    allowed = a.GetMetadata("allowedTokens")
+    if not allowed or "SENSOR" in [str(t) for t in allowed]:
+        a.Set("SENSOR")
+    v = a.Get()
+    return None if v is None else str(v)
 
 
 def grid_scan(points: np.ndarray, intensity: np.ndarray | None, elev_deg: np.ndarray, az_res_deg: float = 2.0,
@@ -364,6 +533,65 @@ def radar_detections(points: np.ndarray, radial_velocity: np.ndarray | None, rcs
     return out
 
 
+def gmo_host_pointer(d: dict) -> int | np.ndarray | None:
+    """Host address (or host byte buffer) of a ``GenericModelOutput`` annotator frame, None if not host-readable.
+
+    The buffer lives on the GPU by default in 5.x (``gmoDeviceIndex >= 0``); dereferencing a device address from
+    Python would crash the process, so only ``gmoDeviceIndex == -1`` is accepted.
+    """
+    if not isinstance(d, dict):
+        return None
+    dev = _field(d, "gmoDeviceIndex")
+    if dev is None or int(np.asarray(dev).reshape(-1)[0]) != -1:
+        return None
+    v = _field(d, "gmoBufferPointer")
+    if v is None:
+        return None
+    a = np.asarray(v)
+    if a.dtype.kind in "iu" and a.size == 1:
+        ptr = int(a.reshape(-1)[0])
+        return ptr if ptr else None
+    if a.dtype == np.uint8 and a.size > 1:
+        return a
+    return None
+
+
+def gmo_radar_fields(gmo, n: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Per-return radial velocity (m/s) and RCS (dBsm) from a decoded ``GenericModelOutput`` (duck-typed).
+
+    Radar GMO frames carry RCS in the element ``scalar`` array and the radial velocity in the radar auxiliary
+    data (``rv_ms``).  An array is used only when its length equals ``n``, the number of extracted cartesian
+    points: then no return was dropped and element ``k`` is point ``k``; otherwise pairing would be ambiguous and
+    None is returned for that field.
+    """
+    if gmo is None or n <= 0:
+        return None, None
+
+    def pick(obj, names):
+        for nm in names:
+            v = getattr(obj, nm, None)
+            if v is None or isinstance(v, (str, bytes)):
+                continue
+            try:
+                a = np.asarray(v, dtype=float).reshape(-1)
+            except (TypeError, ValueError):
+                continue
+            if len(a) == n:
+                return a
+        return None
+
+    aux = next((getattr(gmo, k) for k in ("auxiliaryData", "auxData", "aux") if getattr(gmo, k, None) is not None),
+               None)
+    vr_names, rcs_names = ("rv_ms", "radialVelocities", "radialVelocity"), ("rcs", "rcsDbsm", "scalar")
+    vr = pick(gmo, vr_names)
+    if vr is None and aux is not None:
+        vr = pick(aux, vr_names)
+    rcs = pick(gmo, rcs_names)
+    if rcs is None and aux is not None:
+        rcs = pick(aux, rcs_names)
+    return vr, rcs
+
+
 def los_blocked(raycast, origin: np.ndarray, target: np.ndarray, start: float = 0.35, end_margin: float = 0.1,
                 self_prefix: str = ROBOT_PRIM) -> bool:
     """Line-of-sight test that starts ``start`` m out of the robot and ignores the robot's own colliders.
@@ -411,19 +639,53 @@ def _get_annotator(names: list[str], init_params: dict | None = None):
     raise RuntimeError(f"no annotator among {names}: {last}")
 
 
+def _declares_kwarg(cmd: str, name: str) -> bool | None:
+    """Whether a Kit command's constructor (any class in its MRO) declares ``name``; None if unknown."""
+    try:
+        import inspect
+
+        import omni.kit.commands
+        cls = omni.kit.commands.get_command_class(cmd)
+        if cls is None:
+            return None
+        for c in cls.__mro__:
+            init = c.__dict__.get("__init__")
+            if init is not None and name in inspect.signature(init).parameters:
+                return True
+        return False
+    except Exception:  # pragma: no cover - depends on the Kit version
+        return None
+
+
 def _create_rtx_sensor(commands: list[str], path: str, parent: str, profile: str):
+    """Create an RTX sensor prim with the custom JSON ``profile``; returns ``(prim, command, forced_camera_prim)``.
+
+    Isaac Sim 5.x only honours a custom profile on the deprecated camera-prim path, so ``force_camera_prim=True``
+    is tried first wherever the command may accept it; 4.x commands (no such argument) are called without it.
+    """
     import omni.kit.commands
     from pxr import Gf
     last = None
     for cmd in commands:
-        try:
-            ok, prim = omni.kit.commands.execute(cmd, path=path, parent=parent, config=profile,
-                                                 translation=Gf.Vec3d(0, 0, 0), orientation=Gf.Quatd(1, 0, 0, 0))
-            if prim is not None:
-                return prim, cmd
-        except Exception as e:  # pragma: no cover
-            last = e
+        declared = _declares_kwarg(cmd, "force_camera_prim")
+        for extra in ([{"force_camera_prim": True}, {}] if declared is not False else [{}]):
+            try:
+                ok, prim = omni.kit.commands.execute(cmd, path=path, parent=parent, config=profile,
+                                                     translation=Gf.Vec3d(0, 0, 0), orientation=Gf.Quatd(1, 0, 0, 0),
+                                                     **extra)
+                prim = prim.GetPrim() if hasattr(prim, "GetPrim") else prim     # Usd.Prim or a schema object
+                if prim is not None and prim.IsValid():
+                    return prim, cmd, bool(extra)
+            except Exception as e:  # pragma: no cover
+                last = e
     raise RuntimeError(f"could not create RTX sensor with {commands} (profile {profile}): {last}")
+
+
+def _profile_warning(kind: str, info: dict) -> str | None:
+    if info["profile_applied"]:
+        return None
+    return (f"{kind} profile {info['profile_requested']!r} was not applied: the created {info['prim_type']} prim "
+            f"carries {info['profile_resolved']} (Isaac Sim 5.x drops custom JSON profiles on OmniSensor prims)")
 
 
 def render_product_path(rp) -> str:
@@ -435,7 +697,9 @@ class RtxLidarAdapter:
                  az_res_deg: float = 2.0, max_range: float = 20.0):
         import omni.replicator.core as rep
         _register_profile_folder()
-        self.prim, cmd = _create_rtx_sensor(LIDAR_COMMANDS, "rtx_lidar", parent, profile)
+        self.prim, cmd, forced = _create_rtx_sensor(LIDAR_COMMANDS, "rtx_lidar", parent, profile)
+        cfg_info = sensor_config_info(self.prim, profile)
+        frame = set_output_frame_sensor(self.prim)
         self.rp = rep.create.render_product(str(self.prim.GetPath()), [1, 1], name="medortrace_lidar")
         self.ann, self.ann_name = _get_annotator(LIDAR_ANNOTATORS)
         try:
@@ -445,12 +709,27 @@ class RtxLidarAdapter:
             pass
         self.ann.attach([self.rp])
         self.mount_height = mount_height
+        self.warnings: list[str] = []
         self.elev = lidar_elevations(CONFIG_DIR / "sensors" / f"{profile}.json")
+        ring_source = "profile"
+        msg = _profile_warning("lidar", cfg_info)
+        if msg:
+            prim_el = prim_lidar_elevations(self.prim)
+            if prim_el is not None:
+                self.elev, ring_source = prim_el, "prim"
+                msg += f"; ring grid uses the prim's {len(prim_el)} emitter elevations"
+            else:
+                ring_source = "profile (sensor model differs)"
+                msg += "; ring grid still uses the JSON elevations and may not match the returns"
+            self.warnings.append(msg)
+            print(f"[medortrace] WARNING: {msg}")
         self.az_res = float(az_res_deg)
         self.max_range = float(max_range)
-        self.backend_info = {"prim": str(self.prim.GetPath()), "command": cmd, "annotator": self.ann_name,
-                             "profile": profile, "render_product": render_product_path(self.rp),
-                             "grid": [len(self.elev), int(round(360 / self.az_res))]}
+        self.backend_info = {"prim": str(self.prim.GetPath()), "command": cmd, "force_camera_prim": forced,
+                             **cfg_info, "output_frame": frame or "annotator transformPoints=False",
+                             "annotator": self.ann_name, "render_product": render_product_path(self.rp),
+                             "grid": [len(self.elev), int(round(360 / self.az_res))], "ring_source": ring_source,
+                             "warnings": self.warnings}
         self._seq = 0
 
     def read(self, t: float, stamp_fn) -> LidarScan | None:
@@ -473,10 +752,25 @@ class RtxLidarAdapter:
 
 
 class RtxRadarAdapter:
+    """RTX radar -> :class:`RadarFrame`.
+
+    With the 4.x radar point-cloud annotators every return carries its radial velocity and RCS.  With the 5.x
+    cartesian extractor (``IsaacExtractRTXSensorPointCloudNoAccumulator``) they are decoded from a second,
+    ``GenericModelOutput`` annotator when its buffer is host-readable and aligned with the points
+    (:func:`gmo_radar_fields`), else reported as 0; ``backend_info["doppler_frames"]`` counts the source per frame.
+    """
+
     def __init__(self, parent: str, profile: str = "rtx_radar_or77", mount_offset=(0.25, 0.0, 0.0)):
         import omni.replicator.core as rep
         _register_profile_folder()
-        self.prim, cmd = _create_rtx_sensor(RADAR_COMMANDS, "rtx_radar", parent, profile)
+        self.prim, cmd, forced = _create_rtx_sensor(RADAR_COMMANDS, "rtx_radar", parent, profile)
+        cfg_info = sensor_config_info(self.prim, profile)
+        frame = set_output_frame_sensor(self.prim)
+        self.warnings: list[str] = []
+        msg = _profile_warning("radar", cfg_info)
+        if msg:
+            self.warnings.append(msg)
+            print(f"[medortrace] WARNING: {msg}")
         self.rp = rep.create.render_product(str(self.prim.GetPath()), [1, 1], name="medortrace_radar")
         self.ann, self.ann_name = _get_annotator(RADAR_ANNOTATORS)
         try:
@@ -484,10 +778,46 @@ class RtxRadarAdapter:
         except Exception:
             pass
         self.ann.attach([self.rp])
+        self.cartesian_only = self.ann_name in CARTESIAN_ONLY_ANNOTATORS
+        self.gmo, self.gmo_name, self._get_gmo = None, None, None
+        if self.cartesian_only:
+            self._attach_gmo()
         self.mount_offset = tuple(mount_offset)
-        self.backend_info = {"prim": str(self.prim.GetPath()), "command": cmd, "annotator": self.ann_name,
-                             "profile": profile, "render_product": render_product_path(self.rp)}
+        self.doppler_frames = {"annotator": 0, "gmo": 0, "zeros": 0}
+        self.backend_info = {"prim": str(self.prim.GetPath()), "command": cmd, "force_camera_prim": forced,
+                             **cfg_info, "output_frame": frame or "annotator transformPoints=False",
+                             "annotator": self.ann_name, "gmo_annotator": self.gmo_name,
+                             "render_product": render_product_path(self.rp), "doppler_frames": self.doppler_frames,
+                             "warnings": self.warnings}
         self._seq = 0
+
+    def _attach_gmo(self) -> None:
+        try:
+            import carb
+            # 5.x keeps radar buffers on the GPU by default; the GMO is only decoded from host memory
+            carb.settings.get_settings().set("/app/sensors/nv/radar/outputBufferOnGPU", False)
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            from isaacsim.sensors.rtx import get_gmo_data
+            self.gmo, self.gmo_name = _get_annotator(GMO_ANNOTATORS)
+            self.gmo.attach([self.rp])
+            self._get_gmo = get_gmo_data
+        except Exception as e:
+            self.gmo = None
+            msg = f"radar annotator {self.ann_name} has no Doppler/RCS and no GenericModelOutput decoder ({e}): " \
+                  "radial velocity and RCS are reported as 0"
+            self.warnings.append(msg)
+            print(f"[medortrace] WARNING: {msg}")
+
+    def _gmo_fields(self, n: int):
+        if self.gmo is None or n == 0:
+            return None, None
+        try:
+            ptr = gmo_host_pointer(self.gmo.get_data() or {})
+            return gmo_radar_fields(self._get_gmo(ptr) if ptr is not None else None, n)
+        except Exception:  # pragma: no cover - release-dependent GMO layout
+            return None, None
 
     def read(self, t: float, stamp_fn) -> RadarFrame | None:
         d = self.ann.get_data() or {}
@@ -497,6 +827,14 @@ class RtxRadarAdapter:
             pts = np.asarray(raw if raw is not None else np.zeros((0, 3)), dtype=float).reshape(-1, 3)
         vr = _field(d, "radialVelocities", "radialVelocity", "velocities")
         rcs = _field(d, "rcs", "rcss", "rcsDbsm")
+        src = "annotator" if vr is not None else "zeros"      # source of the radial velocities
+        if vr is None or rcs is None:
+            g_vr, g_rcs = self._gmo_fields(len(pts))
+            if vr is None and g_vr is not None:
+                vr, src = g_vr, "gmo"
+            rcs = g_rcs if rcs is None else rcs
+        if len(pts):
+            self.doppler_frames[src] += 1
         self._seq += 1
         return RadarFrame(Header(stamp_fn("radar", t), t, "radar_link", self._seq),
                           radar_detections(pts, vr, rcs, self.mount_offset))

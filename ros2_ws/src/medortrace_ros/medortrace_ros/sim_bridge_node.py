@@ -13,12 +13,25 @@ the command to the wheel drives itself); with ``--isaac-graph`` the OmniGraph
 of ``medortrace.isaac.ros2_bridge`` is added through
 ``IsaacBackend.add_reset_hook(ros2_reset_hook(drive_from_cmd_vel=False))`` for
 RTX lidar / RGB / depth / camera_info, and the topics it publishes itself
-(clock, TF, odom, lidar points) are left to it.
+(``ISAAC_GRAPH_GROUPS``: /clock, lidar points) are left to it.
+
+TF with the OmniGraph.  The graph's ``PublishTF`` publishes ``base_link``
+under the stage's world frame (``World``), and its ``ComputeOdom`` /
+``PublishOdom`` report the noise-free chassis pose.  Next to the autonomy
+node's ``map->odom`` that would give ``base_link`` a second parent (or leave
+``map->odom`` dangling).  :func:`handover_base_tf` therefore deletes those
+nodes (``GRAPH_NODES_OWNED_BY_BRIDGE``) and the bridge keeps publishing
+``/medortrace/odom`` and ``odom->base_link`` from the backend's wheel
+odometry, as in every other mode: the tree is always
+``map -> odom -> base_link -> *_link`` (the graph's ``PublishSensorTF``
+provides the sensor frames under ``base_link``).
 
 ``create(backend)`` is the ``--bridge medortrace_ros.sim_bridge_node:create``
 factory of ``scripts/isaac/ros2_sim.py`` (Isaac Sim driven by an external
-``/medortrace/cmd_vel`` through the OmniGraph): it returns a callable that
-publishes every ``SensorBundle``'s custom-message topics.
+``/medortrace/cmd_vel`` through the OmniGraph): it applies
+:func:`handover_base_tf` and returns a callable that publishes every
+``SensorBundle``'s remaining topics (odometry + odom->base_link TF, custom
+messages, mission, ground truth).
 
 Timing.  The bridge owns simulated time and publishes ``/clock`` (offset by
 ``clock_offset_s`` so that time 0 is never ambiguous with "no clock yet";
@@ -50,7 +63,38 @@ from medortrace_ros.mission import episode_config, mission_from_episode
 
 ALL_GROUPS = ("clock", "tf", "lidar", "camera", "radar", "acoustic", "landmarks", "imu", "odom", "contact",
               "battery", "workflow", "mission", "ground_truth")
-ISAAC_GRAPH_GROUPS = ("clock", "tf", "odom", "lidar")      # published by the OmniGraph when --isaac-graph
+ISAAC_GRAPH_GROUPS = ("clock", "lidar")      # published by the OmniGraph when --isaac-graph
+# OmniGraph nodes (medortrace.isaac.ros2_bridge.graph_spec) whose output the bridge publishes instead: the world-
+# parented base_link TF and the noise-free odometry (see the module docstring, "TF with the OmniGraph")
+GRAPH_NODES_OWNED_BY_BRIDGE = ("PublishTF", "ComputeOdom", "PublishOdom")
+
+
+def integrate_odom(pose: np.ndarray, v: float, omega: float, dt: float) -> np.ndarray:
+    """Dead-reckon wheel odometry (midpoint heading) in the odom frame (REP 105: origin = start pose)."""
+    th = pose[2] + 0.5 * omega * dt
+    out = pose + np.array([v * dt * np.cos(th), v * dt * np.sin(th), omega * dt])
+    out[2] = float(wrap_angle(out[2]))
+    return out
+
+
+def handover_base_tf(backend) -> list[str]:  # pragma: no cover - requires Isaac Sim
+    """Delete the OmniGraph nodes the bridge replaces (``GRAPH_NODES_OWNED_BY_BRIDGE``); returns their names.
+
+    Also usable as an ``IsaacBackend.add_reset_hook`` callback registered after ``ros2_reset_hook`` (hooks
+    run in registration order).  Idempotent: nodes that are already gone are skipped.
+    """
+    import omni.graph.core as og
+    import omni.usd
+
+    from medortrace.isaac.ros2_bridge import GRAPH_PATH
+
+    path = getattr(backend, "ros2_graph", None) or GRAPH_PATH
+    stage = omni.usd.get_context().get_stage()
+    present = [n for n in GRAPH_NODES_OWNED_BY_BRIDGE if stage.GetPrimAtPath(f"{path}/{n}").IsValid()]
+    if present:
+        og.Controller.edit(path, {og.Controller.Keys.DELETE_NODES: present})
+        print(f"[medortrace] OmniGraph {path}: removed {present} (odom + odom->base_link come from the bridge)")
+    return present
 
 
 class SimBridgeCore:
@@ -98,9 +142,7 @@ class SimBridgeCore:
         self.n_steps += 1
         o = self.bundle.odom
         if o is not None:                      # dead-reckoned wheel odometry (drifts with the odom bias fault)
-            th = self.odom_pose[2] + 0.5 * o.omega * self.dt
-            self.odom_pose += np.array([o.v * self.dt * np.cos(th), o.v * self.dt * np.sin(th), o.omega * self.dt])
-            self.odom_pose[2] = float(wrap_angle(self.odom_pose[2]))
+            self.odom_pose = integrate_odom(self.odom_pose, o.v, o.omega, self.dt)
         return self.bundle
 
     def truth(self):
@@ -305,8 +347,10 @@ class SimBridgeNode:
 def create(backend, groups: tuple[str, ...] | None = None, t0: float = 0.0):
     """``scripts/isaac/ros2_sim.py --bridge medortrace_ros.sim_bridge_node:create`` factory.
 
-    There the OmniGraph publishes /clock (raw simulation time, hence ``t0 = 0``), /tf, odometry and the
-    RTX lidar cloud, and drives the wheels from /medortrace/cmd_vel; this sink publishes the remaining
+    There the OmniGraph publishes /clock (raw simulation time, hence ``t0 = 0``), the RTX lidar cloud and
+    the sensor frames, and drives the wheels from /medortrace/cmd_vel.  Its world-parented base_link TF and
+    odometry are removed (:func:`handover_base_tf`; the backend has been reset, so the graph exists); this
+    sink publishes odometry + odom->base_link from the bundles' wheel odometry and the remaining
     (custom-message) topics of every bundle plus the mission and ground truth.
     """
     import rclpy
@@ -316,11 +360,17 @@ def create(backend, groups: tuple[str, ...] | None = None, t0: float = 0.0):
     node = rclpy.create_node("medortrace_sim_bridge")
     ep = backend.episode
     grp = set(groups or ALL_GROUPS) - set(ISAAC_GRAPH_GROUPS)
+    if grp & {"tf", "odom"}:
+        handover_base_tf(backend)
     out = BundlePublisher(node, grp, t0, float(ep.cfg.get("robot", {}).get("battery_capacity_wh", 480.0)))
     out.publish_mission(mission_from_episode(ep, ep.cfg, t0=t0))
+    odom_pose = np.zeros(3)
 
     def sink(bundle: SensorBundle) -> None:
-        out.publish(bundle, float(backend.t), None, backend.truth() if "ground_truth" in grp else None)
+        nonlocal odom_pose
+        if bundle.odom is not None:
+            odom_pose = integrate_odom(odom_pose, bundle.odom.v, bundle.odom.omega, float(backend.dt))
+        out.publish(bundle, float(backend.t), odom_pose, backend.truth() if "ground_truth" in grp else None)
         rclpy.spin_once(node, timeout_sec=0.0)
 
     sink.node = node
@@ -370,12 +420,15 @@ def main(args=None) -> None:
         groups.discard("workflow")
     clock_offset = float(p("clock_offset_s", 100.0))
     if isaac_graph:
-        # the OmniGraph publishes /clock (raw simulation time), TF, odometry and the RTX lidar cloud; the
-        # backend keeps driving the wheels from our command (drive_from_cmd_vel=False: one controller only)
+        # the OmniGraph publishes /clock (raw simulation time), the RTX lidar cloud and the sensor frames; the
+        # backend keeps driving the wheels from our command (drive_from_cmd_vel=False: one controller only) and
+        # odometry + odom->base_link stay with the bridge (handover_base_tf runs after the graph is built)
         from medortrace.isaac.backend import IsaacBackend
         from medortrace.isaac.ros2_bridge import ros2_reset_hook
 
         IsaacBackend.add_reset_hook(ros2_reset_hook(drive_from_cmd_vel=False))
+        if groups & {"tf", "odom"}:
+            IsaacBackend.add_reset_hook(handover_base_tf)
         groups -= set(ISAAC_GRAPH_GROUPS)
         clock_offset = 0.0
     core = SimBridgeCore(scenario, seed, backend, duration, policy, override, clock_offset)

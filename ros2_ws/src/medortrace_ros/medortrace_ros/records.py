@@ -8,7 +8,13 @@ tested without a ROS installation.
 Provenance events are streamed incrementally (:class:`ProvenanceCursor`) and
 carry everything needed to re-verify the hash chain on the receiving side
 (:func:`verify_provenance_stream` re-implements
-``ProvenanceGraph.verify_chain`` over the message stream).
+``ProvenanceGraph.verify_chain`` over the message stream).  A subscriber that
+joined late holds only the transient-local history (the newest ``depth``
+events of the ``provenance`` QoS); it verifies that suffix against an anchor
+it trusts (the last event it stored before a restart) or, without one, as a
+self-consistent contiguous chain.
+The complete chain from ``GENESIS`` is the autonomy node's audit export
+(``audit_dir``) or a recording started with the mission.
 """
 
 from __future__ import annotations
@@ -105,10 +111,26 @@ class ProvenanceCursor:
         return out
 
 
-def verify_provenance_stream(events: list) -> bool:
-    """Re-verify the hash chain from received ProvenanceEvent-like records (index order, starting at 0)."""
-    prev = "GENESIS"
-    for k, e in enumerate(sorted(events, key=lambda e: e.index)):
+GENESIS = "GENESIS"
+
+
+def verify_provenance_stream(events: list, anchor: tuple[int, str] | None = None, allow_suffix: bool = False) -> bool:
+    """Re-verify the hash chain from received ProvenanceEvent-like records (any order, contiguous indices).
+
+    Default: the records are the complete chain, indices ``0 .. n-1``, the first linked to ``GENESIS``.
+    ``anchor=(index, hash)``: the records continue a chain whose event ``index`` had ``hash`` (e.g. the last
+    event stored before a restart); they must start at ``index + 1`` and link to ``hash``.
+    ``allow_suffix``: without an anchor, a suffix (a late joiner's transient-local history) is accepted if it
+    is contiguous and every hash re-computes; only its first ``prev_hash`` is then taken on trust.
+    """
+    evs = sorted(events, key=lambda e: e.index)
+    if anchor is not None:
+        k0, prev = int(anchor[0]) + 1, str(anchor[1])
+    elif allow_suffix and evs:
+        k0, prev = int(evs[0].index), evs[0].prev_hash
+    else:
+        k0, prev = 0, GENESIS
+    for k, e in enumerate(evs, start=k0):
         if e.index != k or e.prev_hash != prev:
             return False
         payload = json.dumps({"id": e.node_id, "kind": e.kind, "t": round(float(e.t), 6),

@@ -30,9 +30,8 @@ import importlib
 import sys
 import time
 
-import numpy as np
-
 import _bootstrap  # noqa: F401
+import numpy as np
 from _common import add_isaac_args, add_scenario_args, detector_arg, resolve_scenario, set_prims_api
 
 

@@ -107,7 +107,10 @@ class ContactGate:
                 self.abort_reason = "no stable grasp contact"
                 self._go(Phase.ABORT, x.t, self.abort_reason)
         elif self.phase == Phase.LIFT:
-            if x.expected_effort > 0 and abs(x.wrist_effort - x.expected_effort) > c.effort_tol_frac * x.expected_effort:
+            if (
+                x.expected_effort > 0
+                and abs(x.wrist_effort - x.expected_effort) > c.effort_tol_frac * x.expected_effort
+            ):
                 self.abort_reason = "wrist effort mismatch (snag or wrong object)"
                 self._go(Phase.ABORT, x.t, self.abort_reason)
             elif x.at_place:

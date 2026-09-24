@@ -140,7 +140,9 @@ def generate_scene(cfg: dict, streams: RngStreams) -> SceneSpec:
             p = (float(C.uniform(W - 0.45, W - 0.25)), float(C.uniform(1.4, D - 1.4)))
         hsz = (float(C.uniform(0.1, 0.25)), float(C.uniform(0.1, 0.25)), float(C.uniform(0.2, 0.7)))
         b = _box((p[0], p[1], hsz[2]), hsz, float(C.uniform(-0.5, 0.5)))
-        if any(o.box.distance_xy(np.array([p]))[0] < 0.35 for o in objs if o.kind not in ("wall", "light_head", "monitor")):
+        if any(
+            o.box.distance_xy(np.array([p]))[0] < 0.35 for o in objs if o.kind not in ("wall", "light_head", "monitor")
+        ):
             continue
         if np.hypot(p[0] - (W - 0.7), p[1] - D * 0.5) < 1.0:
             continue  # keep the charging dock / entry clear
@@ -158,17 +160,49 @@ def generate_scene(cfg: dict, streams: RngStreams) -> SceneSpec:
     # --- slots -------------------------------------------------------------
     slots = [
         Slot("back_table:tray", "surface", "back_table", (bt[0] - 0.3, bt[1], 0.92), sterile=True, radius=0.3),
-        Slot("back_table:specimen_cup", "surface", "back_table", (bt[0] + 0.45, bt[1] + 0.1, 0.95), sterile=True, radius=0.15),
-        Slot("back_table:under_towel", "under_drape", "back_table", (bt[0] + 0.1, bt[1] - 0.15, 0.92),
-             hidden_from_camera=True, sterile=True, acoustic_region="back_table_towel"),
+        Slot(
+            "back_table:specimen_cup",
+            "surface",
+            "back_table",
+            (bt[0] + 0.45, bt[1] + 0.1, 0.95),
+            sterile=True,
+            radius=0.15,
+        ),
+        Slot(
+            "back_table:under_towel",
+            "under_drape",
+            "back_table",
+            (bt[0] + 0.1, bt[1] - 0.15, 0.92),
+            hidden_from_camera=True,
+            sterile=True,
+            acoustic_region="back_table_towel",
+        ),
         Slot("mayo:top", "surface", "mayo_stand", (mayo[0], mayo[1], 1.12), sterile=True, radius=0.2),
         Slot("field:top", "surface", "patient_drape", (tx + 0.3, ty, 0.97), sterile=True, radius=0.4),
-        Slot("field:under_drape", "under_drape", "patient_drape", (tx + 0.4, ty - 0.35, 0.8),
-             hidden_from_camera=True, sterile=True, acoustic_region="patient_drape"),
-        Slot("kick_bucket_1:inside", "container", "kick_bucket_1", (kb1[0], kb1[1], 0.3), needs_top_view=True, radius=0.2),
-        Slot("kick_bucket_2:inside", "container", "kick_bucket_2", (kb2[0], kb2[1], 0.3), needs_top_view=True, radius=0.2),
-        Slot("waste_bin:inside", "container", "waste_bin", (wb[0], wb[1], 0.5), hidden_from_camera=True,
-             acoustic_region="waste_bin", radius=0.25),
+        Slot(
+            "field:under_drape",
+            "under_drape",
+            "patient_drape",
+            (tx + 0.4, ty - 0.35, 0.8),
+            hidden_from_camera=True,
+            sterile=True,
+            acoustic_region="patient_drape",
+        ),
+        Slot(
+            "kick_bucket_1:inside", "container", "kick_bucket_1", (kb1[0], kb1[1], 0.3), needs_top_view=True, radius=0.2
+        ),
+        Slot(
+            "kick_bucket_2:inside", "container", "kick_bucket_2", (kb2[0], kb2[1], 0.3), needs_top_view=True, radius=0.2
+        ),
+        Slot(
+            "waste_bin:inside",
+            "container",
+            "waste_bin",
+            (wb[0], wb[1], 0.5),
+            hidden_from_camera=True,
+            acoustic_region="waste_bin",
+            radius=0.25,
+        ),
         Slot("specimen_counter:top", "surface", "specimen_counter", (sc[0], sc[1], 0.92), radius=0.3),
         Slot("cart_1:top", "surface", "cart_1", (c1[0], c1[1], 1.01), radius=0.3),
         Slot("cart_2:top", "surface", "cart_2", (c2[0], c2[1], 1.01), radius=0.3),

@@ -53,8 +53,10 @@ class Envelope:
     nis_hard: float = 25.0
     lidar_age_soft: float = 0.5
     lidar_age_hard: float = 1.2
-    path_entropy_soft: float = 0.55
-    path_entropy_hard: float = 0.9
+    # path uncertainty in bits *beyond the surveyed prior* (OccupancyBelief.
+    # excess_uncertainty_field): conflicting evidence ~0.3, ghost-suspect mass up to 1
+    path_entropy_soft: float = 0.25
+    path_entropy_hard: float = 0.6
     contact_force_hard: float = 25.0
     battery_soft_frac: float = 0.2
     t_hold: float = 1.5
@@ -146,7 +148,13 @@ class SafetySupervisor:
         if hard:
             return Mode.STOP, hard + unc_hard, cat
         if soft:
-            return Mode.CAUTION, soft, "uncertainty" if any(s in ("localisation degraded", "lidar late", "path uncertain", "clock skew") for s in soft) else cat
+            return (
+                Mode.CAUTION,
+                soft,
+                "uncertainty"
+                if any(s in ("localisation degraded", "lidar late", "path uncertain", "clock skew") for s in soft)
+                else cat,
+            )
         return Mode.NOMINAL, [], ""
 
     def update(self, x: SafetyInputs) -> Mode:
@@ -178,12 +186,15 @@ class SafetySupervisor:
             else:
                 self._since_clear = None
             if self.mode in (Mode.STOP, Mode.RETREAT) and want in (Mode.STOP, Mode.RETREAT):
-                dur = x.t - (self._stop_started or x.t)
+                # (a stop that began at t = 0.0 is a real start time, not "unset")
+                dur = x.t - (self._stop_started if self._stop_started is not None else x.t)
                 if dur > e.t_handover_after:
                     new = Mode.HANDOVER
                     self.handover_requests += 1
                     reasons = reasons + ["persisting stop -> operator"]
-                elif dur > e.t_retreat_after and self.mode == Mode.STOP and cat in ("human_proximity", "collision_risk"):
+                elif (
+                    dur > e.t_retreat_after and self.mode == Mode.STOP and cat in ("human_proximity", "collision_risk")
+                ):
                     new = Mode.RETREAT
         if new != prev:
             self.events.append(SafetyEvent(x.t, prev.value, new.value, reasons, cat or "recovery",

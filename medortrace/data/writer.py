@@ -47,7 +47,9 @@ class TrajectoryWriter:
         if not self.save_raw:
             return
         self.raw["t"].append(t)
-        self.raw["lidar_ranges"].append(bundle.lidar.ranges[::4].astype(np.float16) if bundle.lidar is not None else None)
+        self.raw["lidar_ranges"].append(
+            bundle.lidar.ranges[::4].astype(np.float16) if bundle.lidar is not None else None
+        )
         self.raw["radar"].append([(d.range, d.azimuth, d.radial_velocity, d.rcs_dbsm) for d in bundle.radar.detections]
                                  if bundle.radar is not None else [])
         self.raw["camera"].append([(d.cls, d.bearing, d.range, float(d.logits.max())) for d in bundle.camera.detections]
@@ -118,7 +120,21 @@ class TrajectoryWriter:
         (d / "provenance.json").write_text(json.dumps(stack.prov.to_prov_json(), default=_json_default))
         (d / "scene_graph.json").write_text(json.dumps(stack.scene_graph(), default=_json_default))
         if self.save_raw:
-            np.savez_compressed(d / "raw_obs.npz", t=np.array(self.raw["t"]),
-                                lidar_ranges=np.array([r if r is not None else np.full_like(next((x for x in self.raw["lidar_ranges"] if x is not None), np.zeros(1, np.float16)), np.nan) for r in self.raw["lidar_ranges"]]),
-                                radar=np.array(json.dumps(self.raw["radar"])), camera=np.array(json.dumps(self.raw["camera"])))
+            np.savez_compressed(
+                d / "raw_obs.npz",
+                t=np.array(self.raw["t"]),
+                lidar_ranges=np.array(
+                    [
+                        r
+                        if r is not None
+                        else np.full_like(
+                            next((x for x in self.raw["lidar_ranges"] if x is not None), np.zeros(1, np.float16)),
+                            np.nan,
+                        )
+                        for r in self.raw["lidar_ranges"]
+                    ]
+                ),
+                radar=np.array(json.dumps(self.raw["radar"])),
+                camera=np.array(json.dumps(self.raw["camera"])),
+            )
         return d

@@ -6,13 +6,17 @@
 Causal lock / nuisance randomiser (the pxr-only parts of ``medortrace.isaac.replicator_randomizers``):
   * CF-B stages (both arms) randomise for several frames without CausalViolation;
   * a randomiser that moves a locked prim, an out-of-band move of a locked item, an edit of a locked
-    material input and pushing clutter into the CF-B keep-clear disc all raise CausalViolation;
+    material input and pushing clutter into the CF-B keep-clear disc all raise CausalViolation, and so do
+    edits that hide or alter a locked object without moving it (deactivate, guide purpose, geometry size,
+    render-purpose rebinding, time samples, MDL source swap, hidden parent);
   * moving unlocked clutter does not; ``causal_edit()`` accepts deliberate item moves;
   * matched pairs (CF-B, CF-D): same nuisance seed -> identical nuisance signature per frame in both
     arms, different seed -> different; per-frame randomisation is idempotent (no drift);
   * PreviewSurface and MDL (what RTX renders) receive the same appearance values.
 Pure helpers: lidar grid binning, pinhole rays, the gt-surrogate on a Replicator-style structured
-array, custody placement parity with ``LiteBackend``, ``CausalLabelWriter`` output, ROS 2 graph wiring.
+array, RTX profile read-back from 5.x ``OmniLidar`` vs camera prims, 5.x radar Doppler/RCS from the
+GenericModelOutput, reflective-fault material edits (lite parity), custody placement parity with
+``LiteBackend``, ``CausalLabelWriter`` output, ROS 2 graph wiring.
 """
 from __future__ import annotations
 
@@ -23,16 +27,13 @@ import tempfile
 import traceback
 from pathlib import Path
 
-import numpy as np
-
 import _bootstrap  # noqa: F401
+import numpy as np
 from _common import DEFAULT_REGISTRY
-
-from pxr import Gf, Usd, UsdGeom, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 from medortrace.eval.registry import load_registry
-from medortrace.isaac.replicator_randomizers import (CausalLabelWriter, CausalLock, CausalViolation,
-                                                     NuisanceRandomizer)
+from medortrace.isaac.replicator_randomizers import CausalLabelWriter, CausalLock, CausalViolation, NuisanceRandomizer
 from medortrace.sim.episode import build_episode
 from medortrace.usd.robot_rig import build_rig
 from medortrace.usd.scene_builder import build_stage
@@ -138,6 +139,39 @@ def c_mat(S: Stages):
     return expect_violation(rnd.apply)[:110]
 
 
+@check("cfb.hiding_the_hidden_cause_raises")
+def c_hide(S: Stages):
+    """Edits that remove or alter a locked object in the render without moving it."""
+    obst, screen = "/World/Furniture/aisle_obstacle", "/World/Furniture/steel_screen"
+
+    def screen_mdl(st):
+        mat = UsdShade.MaterialBindingAPI(st.GetPrimAtPath(screen)).GetDirectBinding().GetMaterialPath()
+        return UsdShade.Shader(st.GetPrimAtPath(mat.AppendChild("MDL")))
+
+    edits = {
+        "deactivate": lambda st: st.GetPrimAtPath(obst).SetActive(False),
+        "purpose_guide": lambda st: UsdGeom.Imageable(st.GetPrimAtPath(obst)).CreatePurposeAttr("guide"),
+        "shrink_geometry": lambda st: UsdGeom.Cube(st.GetPrimAtPath(obst)).GetSizeAttr().Set(0.001),
+        "item_geometry": lambda st: UsdGeom.Cube(st.GetPrimAtPath("/World/Items/clamp_1")).GetSizeAttr().Set(5.0),
+        "render_purpose_rebind": lambda st: UsdShade.MaterialBindingAPI(st.GetPrimAtPath(obst)).Bind(
+            UsdShade.Material(st.GetPrimAtPath("/World/Looks/gown_fabric")), UsdShade.Tokens.weakerThanDescendants,
+            UsdShade.Tokens.full),
+        "time_sampled_pose": lambda st: translate_op(st.GetPrimAtPath(obst)).Set(Gf.Vec3d(0, 0, -9), 5.0),
+        "mdl_source_swap": lambda st: screen_mdl(st).SetSourceAsset(Sdf.AssetPath("OmniGlass.mdl"), "mdl"),
+        "hide_parent": lambda st: UsdGeom.Imageable(st.GetPrimAtPath("/World/Furniture")).MakeInvisible(),
+    }
+    for k, (name, fn) in enumerate(edits.items()):
+        st = S.build("cf_b__p0000__real_obstacle", f"_hide{k}")
+
+        class Rogue(NuisanceRandomizer):
+            def rogue(self, fn=fn):
+                fn(self.stage)
+
+        msg = expect_violation(lambda st=st: Rogue(st, seed=1).apply(which=("materials", "rogue")))
+        assert "rogue" in msg, f"{name}: {msg}"
+    return f"{len(edits)} hiding edits caught ({', '.join(edits)})"
+
+
 @check("cfb.unlocked_clutter_move_ok_but_keep_clear_intrusion_raises")
 def c_clutter(S: Stages):
     st = S.build("cf_b__p0000__specular_ghost", "_clutter")
@@ -229,8 +263,8 @@ def c_idem(S: Stages):
 # ---------------------------------------------------------------------------
 @check("sensors.grid_scan")
 def c_grid():
-    from medortrace.isaac.sensors import grid_scan, lidar_elevations
     from medortrace.common.config import CONFIG_DIR
+    from medortrace.isaac.sensors import grid_scan, lidar_elevations
     el = lidar_elevations(CONFIG_DIR / "sensors" / "rtx_lidar_or16.json")
     pts = np.array([[2.0, 0.0, 0.0], [2.5, 0.001, 0.0], [0.0, 3.0, 3.0 * np.tan(np.deg2rad(15))], [0, 0, 0]])
     p, i, ring, dirs, ranges, _ = grid_scan(pts, np.array([10.0, 20.0, 5.0, 1.0]), el, 2.0, 20.0)
@@ -285,6 +319,93 @@ def c_surrogate():
         hits += len(dets)
     assert hits > 10, "surrogate almost never detects visible items"
     return f"{hits} detections over 20 draws, person/off-class boxes ignored"
+
+
+@check("sensors.rtx_profile_readback_5x")
+def c_profile():
+    from medortrace.isaac.sensors import (
+        OUTPUT_FRAME_ATTR,
+        prim_lidar_elevations,
+        sensor_config_info,
+        set_output_frame_sensor,
+    )
+    st = Usd.Stage.CreateInMemory()
+    cam = UsdGeom.Camera.Define(st, "/rtx_lidar").GetPrim()        # 4.x / 5.x force_camera_prim path
+    cam.CreateAttribute("sensorModelConfig", Sdf.ValueTypeNames.String).Set("rtx_lidar_or16")
+    ok = sensor_config_info(cam, "rtx_lidar_or16")
+    assert ok["profile_applied"] and ok["profile_resolved"] == "rtx_lidar_or16", ok
+    assert set_output_frame_sensor(cam) is None                    # camera prims have no such attribute
+    omni = st.DefinePrim("/rtx_lidar_01", "OmniLidar")             # 5.x default: config dropped
+    omni.CreateAttribute("omni:sensor:Core:emitterState:s001:elevationDeg",
+                         Sdf.ValueTypeNames.FloatArray).Set([2.0, -15.0, 2.0, 7.5])
+    a = omni.CreateAttribute(OUTPUT_FRAME_ATTR, Sdf.ValueTypeNames.Token)
+    a.Set("WORLD")
+    a.SetMetadata("allowedTokens", ["SENSOR", "WORLD"])
+    bad = sensor_config_info(omni, "rtx_lidar_or16")
+    assert not bad["profile_applied"] and bad["prim_type"] == "OmniLidar", bad
+    assert np.allclose(prim_lidar_elevations(omni), [-15.0, 2.0, 7.5])
+    assert set_output_frame_sensor(omni) == "SENSOR"
+    return f"camera prim applied; OmniLidar -> {bad['profile_resolved']}, rings from prim, frame SENSOR"
+
+
+@check("sensors.radar_5x_cartesian_gmo_fields")
+def c_radar_gmo():
+    from types import SimpleNamespace
+
+    from medortrace.isaac.sensors import (
+        CARTESIAN_ONLY_ANNOTATORS,
+        RADAR_ANNOTATORS,
+        gmo_host_pointer,
+        gmo_radar_fields,
+        radar_detections,
+    )
+    # Isaac Sim 5.0 registers only the generic extractor for radar (isaacsim.sensors.rtx 15.x)
+    assert "IsaacExtractRTXSensorPointCloudNoAccumulator" in RADAR_ANNOTATORS
+    assert set(CARTESIAN_ONLY_ANNOTATORS) <= set(RADAR_ANNOTATORS)
+    pts = np.array([[3.0, 0.0, 0.0], [0.0, 2.0, 0.5]])
+    gmo = SimpleNamespace(numElements=2, x=np.zeros(2), scalar=np.array([10.0, -3.0]),
+                          auxiliaryData=SimpleNamespace(rv_ms=np.array([-1.5, 0.25])))
+    vr, rcs = gmo_radar_fields(gmo, len(pts))
+    assert np.allclose(vr, [-1.5, 0.25]) and np.allclose(rcs, [10.0, -3.0])
+    assert gmo_radar_fields(gmo, 3) == (None, None), "misaligned GMO must not be paired with points"
+    dets = radar_detections(pts, vr, rcs, (0.25, 0.0, 0.0))
+    assert np.isclose(dets[0].range, 3.25) and np.isclose(dets[0].radial_velocity, -1.5)
+    assert gmo_host_pointer({"gmoBufferPointer": np.uint64(1234), "gmoDeviceIndex": 0}) is None, "device buffer"
+    assert gmo_host_pointer({"gmoBufferPointer": np.uint64(1234), "gmoDeviceIndex": -1}) == 1234
+    assert gmo_host_pointer({"gmoBufferPointer": 0, "gmoDeviceIndex": -1}) is None
+    return "Doppler/RCS from aligned host GMO only; device buffers never dereferenced"
+
+
+@check("faults.reflective_material_edits")
+def c_reflective(S: Stages):
+    from medortrace.isaac.sensors import NONVISUAL_COATING, apply_reflective_faults, reflective_material_edits
+    sid = "reflective__0000"
+    st = S.build(sid, "_refl")
+    ep = S.eps[sid]
+    fm = ep.faults
+    assert fm.specular_gain > 1.0 and fm.floor_wet, "registry reflective entry lost its faults"
+    floor = st.GetPrimAtPath("/World/Room/Floor")
+    phys_before = UsdShade.MaterialBindingAPI(floor).GetDirectBinding("physics").GetMaterialPath()
+    rows = apply_reflective_faults(st, ep.materials, fm.specular_gain, fm.floor_wet)
+    edited, wet = reflective_material_edits(ep.materials, fm.specular_gain, fm.floor_wet)
+    for name, m in edited.items():                         # lite: spec * gain, clipped at 0.98
+        assert np.isclose(m.specularity, min(0.98, ep.materials[name].specularity * fm.specular_gain)), name
+        assert m.roughness <= ep.materials[name].roughness and m.nonvisual_coating in NONVISUAL_COATING
+    assert not {n for n, m in ep.materials.items() if m.specularity == 0} & set(edited), "zero specularity gained"
+    api = UsdShade.MaterialBindingAPI(floor)
+    bound = str(api.GetDirectBinding().GetMaterialPath())
+    assert bound.endswith("floor_vinyl_wet") and wet.specularity >= 0.6 and wet.roughness <= 0.05, bound
+    assert api.GetDirectBinding("physics").GetMaterialPath() == phys_before, "wet floor changed friction binding"
+    mdl = UsdShade.Shader(st.GetPrimAtPath(bound + "/MDL"))
+    assert np.isclose(mdl.GetInput("reflection_roughness_constant").Get(), wet.roughness)
+    steel = st.GetPrimAtPath("/World/Looks/stainless_steel_brushed")
+    assert steel.GetAttribute("omni:simready:nonvisual:coating").Get() == "clearcoat"
+    assert np.isclose(UsdShade.Shader(st.GetPrimAtPath("/World/Looks/stainless_steel_brushed/MDL"))
+                      .GetInput("reflection_roughness_constant").Get(), edited["stainless_steel_brushed"].roughness)
+    nominal = S.build("nominal__0000", "_refl")
+    ep_n = S.eps["nominal__0000"]
+    assert apply_reflective_faults(nominal, ep_n.materials, ep_n.faults.specular_gain, ep_n.faults.floor_wet) == []
+    return f"{sid}: {len(rows)} edits (floor -> {bound.split('/')[-1]}, physics binding kept); nominal: none"
 
 
 @check("truth.parity_with_lite_backend")
@@ -350,11 +471,14 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     work = Path(a.keep or tempfile.mkdtemp(prefix="medortrace_isaac_check_"))
     S = Stages(work, a.registry)
-    for fn in (c_apply, c_rogue, c_oob, c_mat, c_clutter, c_edit, c_layer, c_pairs, c_idem):
+    for fn in (c_apply, c_rogue, c_oob, c_mat, c_hide, c_clutter, c_edit, c_layer, c_pairs, c_idem):
         fn(S)
     c_grid()
     c_rays()
     c_surrogate()
+    c_profile()
+    c_radar_gmo()
+    c_reflective(S)
     c_truth(S)
     c_writer(work)
     c_graph()

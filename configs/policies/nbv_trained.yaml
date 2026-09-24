@@ -103,7 +103,7 @@ provenance:
     elite_mean: 0.5176666666666667
     incumbent: -0.04299999999999985
     n_errors: 0
-    wall_s: 10.18
+    wall_s: 10.3
   seeds:
   - iteration: 0
     entries:
@@ -114,9 +114,9 @@ provenance:
       family: nominal
   generator: scripts/train_nbv_policy.py
   command: train_nbv_policy.py --iters 1 --pop 2 --elite 1 --episodes 1 --duration 20 --workers 2 --out runs/policy_search_smoke
-  created_utc: '2026-09-24T17:26:13+00:00'
-  git_commit: 29fd845dce2f7b2de64e5a39a75f3a9ed0c205f8+dirty
-  registry: /home/user/NVIDIA_ISSAC_Med-Or-Trace/configs/seed_registry.yaml
+  created_utc: '2026-09-24T17:36:29+00:00'
+  git_commit: 72faa960fe6cb1ff9b7dbfe63cf14e26f6b59e02+dirty
+  registry: configs/seed_registry.yaml
   base_policy: policies/nbv_default.yaml
   run_dir: runs/policy_search_smoke
   smoke_scale: true

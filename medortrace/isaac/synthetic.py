@@ -31,8 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from medortrace.common.rng import stable_hash
-from medortrace.isaac.truth import (CustodyTimeline, item_offsets, item_position, item_prim_center,
-                                    staff_positions)
+from medortrace.isaac.truth import CustodyTimeline, item_offsets, item_position, item_prim_center, staff_positions
 from medortrace.world.agents import StaffPopulation
 from medortrace.world.scene import SceneSpec
 
@@ -310,7 +309,8 @@ def frame_labels(entry, ep, unit: Unit, frame: int, state: CausalState, vp: View
                          "position": state.item_support[i.id].tolist(),
                          "in_room": bool(np.all(np.isfinite(state.item_support[i.id])))} for i in spec.items},
         "staff": {n: [float(p[0]), float(p[1])] for n, p in state.staff_xy.items()},
-        "faults": ep.faults.active(float(state.t)),
+        "faults": {**ep.faults.active(float(state.t)), "specular_gain": float(ep.faults.specular_gain),
+                   "floor_wet": bool(ep.faults.floor_wet)},
         "causal_signature": rnd_info.get("causal_signature"),
         "nuisance": {k: rnd_info.get(k) for k in ("nuisance_seed", "nuisance_frame", "nuisance_signature",
                                                   "randomizers", "fog")},

@@ -13,9 +13,15 @@ Three rules make the synthetic data usable for *counterfactual* learning:
    *real* obstacle where the specular-ghost arm must have none (furniture already standing in that
    disc is pose-locked instead).
 2. **Verified invariance.**  :class:`CausalLock` records a reference hash of
-   every locked value (world transforms, visibility, ``medortrace:*`` and
-   semantic attributes, bound material shader inputs, non-visual tokens,
-   layer metadata, keep-clear intruders).  ``NuisanceRandomizer.apply``
+   every locked value: for each locked prim its world transform, computed
+   visibility and purpose, active flag, type/applied schemas, *all* attributes
+   (geometry, physics, primvars, ``medortrace:*``, semantics; incl. time
+   samples) and relationships, and its resolved material bindings; for each
+   locked material its whole shader network (inputs, MDL source asset,
+   non-visual tokens); plus layer metadata and keep-clear intruders.  Hiding a
+   hidden-cause object by deactivating it, re-purposing it (``guide``) or
+   shrinking its geometry therefore trips the lock just like moving it.
+   ``NuisanceRandomizer.apply``
    verifies it before the first and after *every* randomiser, so a buggy
    randomiser - or any out-of-band edit between frames - raises
    :class:`CausalViolation` naming the changed prims.  Deliberate causal
@@ -86,18 +92,67 @@ def _hash_matrix(h, m) -> None:
     h.update((np.round(np.array(m, dtype=float), 5) + 0.0).tobytes())   # +0.0 folds -0.0 into 0.0
 
 
+# Runtime / UI state that is not an authored cause: PhysX writes body velocities back to USD while simulating
+# (a resulting pose change is still caught through the world transform); ``ui:`` holds editor hints only.
+UNHASHED_ATTRS = frozenset({"physics:velocity", "physics:angularVelocity"})
+UNHASHED_PREFIXES = ("ui:",)
+
+
+def _hash_value(h, v) -> None:
+    # asset paths by their authored path only: Kit fills in the resolved path once MDL search paths are loaded
+    if isinstance(v, Sdf.AssetPath):
+        h.update(f"@{v.path}@".encode())
+        return
+    if v is not None and not isinstance(v, (str, bytes)) and hasattr(v, "__len__"):
+        if len(v) and isinstance(next(iter(v)), Sdf.AssetPath):
+            h.update(repr([x.path for x in v]).encode())
+            return
+        try:
+            a = np.asarray(v, dtype=float)
+            h.update(f"{a.shape}".encode())
+            h.update((np.round(a, 6) + 0.0).tobytes())
+            return
+        except (TypeError, ValueError):
+            pass
+    h.update(repr(v).encode())
+
+
+def _hash_properties(h, p: Usd.Prim) -> None:
+    """Every attribute (default value, time samples, connections) and relationship target of ``p``."""
+    for a in sorted(p.GetAttributes(), key=lambda a: a.GetName()):
+        name = a.GetName()
+        if name in UNHASHED_ATTRS or name.startswith(UNHASHED_PREFIXES):
+            continue
+        h.update(f"|{name}=".encode())
+        _hash_value(h, a.Get())
+        samples = a.GetTimeSamples()
+        if samples:
+            h.update(f"@{list(samples)}".encode())
+            for t in samples:
+                _hash_value(h, a.Get(t))
+        conns = a.GetConnections()
+        if conns:
+            h.update(f"<-{[str(c) for c in conns]}".encode())
+    for r in sorted(p.GetRelationships(), key=lambda r: r.GetName()):
+        h.update(f"|{r.GetName()}->{[str(t) for t in r.GetTargets()]}".encode())
+
+
+def _hash_prim_state(h, p: Usd.Prim) -> None:
+    """Composition-level state that decides whether / how a prim renders (beyond its own properties)."""
+    h.update(f"type={p.GetTypeName()};active={p.IsActive()};schemas={list(p.GetAppliedSchemas())};"
+             f"instanceable={p.IsInstanceable()}".encode())
+
+
 def _material_digest(stage: Usd.Stage, path: str) -> str:
+    """Hash of a material network: the material and every shader below it, all properties (incl. MDL source)."""
     h = hashlib.sha256()
     p = stage.GetPrimAtPath(path)
     if not p.IsValid():
         return "<missing>"
-    for a in sorted(p.GetAttributes(), key=lambda a: a.GetName()):
-        if a.GetName().startswith(("medortrace:", "omni:simready")):
-            h.update(f"{a.GetName()}={a.Get()}".encode())
-    for sh in sorted(p.GetChildren(), key=lambda c: c.GetName()):
-        for a in sorted(sh.GetAttributes(), key=lambda a: a.GetName()):
-            if a.GetName().startswith("inputs:"):
-                h.update(f"{sh.GetName()}.{a.GetName()}={a.Get()}".encode())
+    for q in Usd.PrimRange(p, Usd.PrimAllPrimsPredicate):
+        h.update(f"#{q.GetPath().MakeRelativePath(p.GetPath())}:".encode())
+        _hash_prim_state(h, q)
+        _hash_properties(h, q)
     return h.hexdigest()
 
 
@@ -176,6 +231,14 @@ class CausalLock:
         return sorted(out)
 
     def digests(self) -> dict[str, str]:
+        """Per-key hashes of the causal state.
+
+        A locked prim hashes its world transform, computed visibility *and* purpose (so edits of an ancestor count),
+        active flag, type and applied schemas, every attribute (geometry such as ``size``/``extent``/``points``,
+        ``physics:*``, ``primvars:*``, ``medortrace:*``, semantics; default values and time samples) and every
+        relationship, plus the material it resolves to for the render purposes.  A locked material hashes its whole
+        shader network (:func:`_material_digest`).
+        """
         cache = UsdGeom.XformCache()
         out: dict[str, str] = {}
         for path in self.prims:
@@ -184,13 +247,16 @@ class CausalLock:
             if not p.IsValid():
                 h.update(b"<missing>")
             else:
+                _hash_prim_state(h, p)
                 if p.IsA(UsdGeom.Xformable):
                     _hash_matrix(h, cache.GetLocalToWorldTransform(p))
-                    h.update(str(UsdGeom.Imageable(p).ComputeVisibility()).encode())
-                for a in sorted(p.GetAttributes(), key=lambda a: a.GetName()):
-                    if a.GetName().startswith(("medortrace:", "semantic")):
-                        h.update(f"{a.GetName()}={a.Get()}".encode())
-                h.update(str(_bound_material(p)).encode())
+                if p.IsA(UsdGeom.Imageable):
+                    im = UsdGeom.Imageable(p)
+                    h.update(f"vis={im.ComputeVisibility()};purpose={im.ComputePurpose()}".encode())
+                _hash_properties(h, p)
+                api = UsdShade.MaterialBindingAPI(p)
+                for purpose in (UsdShade.Tokens.allPurpose, UsdShade.Tokens.full, UsdShade.Tokens.preview):
+                    h.update(f"bound[{purpose}]={api.ComputeBoundMaterial(purpose)[0].GetPath()}".encode())
             out[path] = h.hexdigest()
         for path in self.materials:
             out[path] = _material_digest(self.stage, path)
@@ -323,14 +389,14 @@ class NuisanceRandomizer:
             mdl = UsdShade.Shader(self.stage.GetPrimAtPath(path + "/MDL"))
             r_in = prev.GetInput("roughness") if prev else None
             if r_in and r_in.Get() is not None:
-                r0 = float(self._base(path + ".roughness", lambda: float(r_in.Get())))
+                r0 = float(self._base(path + ".roughness", lambda r_in=r_in: float(r_in.Get())))
                 r = float(np.clip(r0 + dr, 0.02, 1.0))
                 r_in.Set(r)
                 _set_input(mdl, "reflection_roughness_constant", r)
                 _set_input(mdl, "frosting_roughness", r)
             c_in = prev.GetInput("diffuseColor") if prev else None
             if c_in and c_in.Get() is not None:
-                c0 = np.asarray(self._base(path + ".diffuseColor", lambda: np.array(c_in.Get(), float)))
+                c0 = np.asarray(self._base(path + ".diffuseColor", lambda c_in=c_in: np.array(c_in.Get(), float)))
                 c = Gf.Vec3f(*map(float, np.clip(c0 * (1 + dc), 0, 1)))
                 c_in.Set(c)
                 _set_input(mdl, "diffuse_color_constant", c)
@@ -347,13 +413,13 @@ class NuisanceRandomizer:
                 continue
             if p.IsA(UsdLux.DiskLight):
                 lt = UsdLux.DiskLight(p)
-                i0 = float(self._base(path + ".intensity", lambda: float(lt.GetIntensityAttr().Get() or 8000.0)))
+                i0 = float(self._base(path + ".intensity", lambda lt=lt: float(lt.GetIntensityAttr().Get() or 8000.0)))
                 lt.GetIntensityAttr().Set(float(np.clip(i0 * s, 2000.0, 20000.0)))
                 lt.CreateEnableColorTemperatureAttr(True)
                 lt.CreateColorTemperatureAttr(ct)
             elif p.IsA(UsdLux.RectLight):
                 lt = UsdLux.RectLight(p)
-                i0 = float(self._base(path + ".intensity", lambda: float(lt.GetIntensityAttr().Get() or 600.0)))
+                i0 = float(self._base(path + ".intensity", lambda lt=lt: float(lt.GetIntensityAttr().Get() or 600.0)))
                 lt.GetIntensityAttr().Set(float(np.clip(i0 * s, 150.0, 2500.0)))
 
     # -- clutter pose jitter (never locked objects, never into keep-clear zones) --
@@ -370,7 +436,7 @@ class NuisanceRandomizer:
             t = ops.get("xformOp:translate")
             if t is None:
                 continue
-            base = self._base(path + ".translate", lambda: Gf.Vec3d(t.Get()))
+            base = self._base(path + ".translate", lambda t=t: Gf.Vec3d(t.Get()))
             new = Gf.Vec3d(base[0] + d[0], base[1] + d[1], base[2])
             t.Set(new if self.lock.keep_clear_ok((new[0], new[1])) else Gf.Vec3d(base))
             rz = ops.get("xformOp:rotateZ")
@@ -380,7 +446,7 @@ class NuisanceRandomizer:
                 order = [t, rz] + [op for op in xf.GetOrderedXformOps() if op.GetOpName() not in
                                    ("xformOp:translate", "xformOp:rotateZ")]
                 xf.SetXformOpOrder(order)
-            r0 = float(self._base(path + ".rotateZ", lambda: float(rz.Get() or 0.0)))
+            r0 = float(self._base(path + ".rotateZ", lambda rz=rz: float(rz.Get() or 0.0)))
             rz.Set(r0 + drot)
 
     # -- drape / gown colour (appearance only) -------------------------------------

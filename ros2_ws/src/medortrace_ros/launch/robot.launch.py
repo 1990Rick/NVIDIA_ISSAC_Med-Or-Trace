@@ -9,8 +9,10 @@ Only the middleware edge changes between simulation and the robot:
   driver names - override per platform); nothing is republished, no extra hop;
 * ``radar_input:=pointcloud2`` accepts a radar driver's point cloud (x, y, z, velocity, intensity) instead
   of ``medortrace_msgs/RadarDetectionArray``;
-* driver lidar clouds carry only returns, so the scan pattern of the OR16 lidar (16 rings, +-15 deg,
-  0.2 deg) is used to re-create the no-return rays needed for free-space carving;
+* driver lidar clouds carry only returns, at the sensor's native resolution (OR16: 16 rings x 0.2 deg =
+  28,800 rays), so they are re-binned onto the stack's ray grid - the OR16 rings x ``sensors.lidar.az_res_deg``
+  (2 deg) = 2,880 rays, nearest return per cell, empty cells as the no-return rays needed for free-space
+  carving - exactly as ``IsaacBackend`` bins the RTX cloud;
 * wall-clock time (no ``use_sim_time``); the mission origin t0 is the node start unless the mission file
   sets ``t0``;
 * camera detections, fiducials and acoustic echoes come from the perception drivers that publish the
@@ -70,8 +72,8 @@ def generate_launch_description():
         parameters=[params, {
             "use_sim_time": False, "mission_source": "file", "mission_file": L("mission_file"),
             "time_origin": "mission", "radar.input": L("radar_input"), "audit_dir": L("audit_dir"),
-            "lidar.fill_no_return_rays": True, "lidar.pattern.rings": 16, "lidar.pattern.elev_min_deg": -15.0,
-            "lidar.pattern.elev_max_deg": 15.0, "lidar.pattern.az_res_deg": 0.2,
+            "lidar.regrid_to_pattern": True, "lidar.pattern.rings": 16, "lidar.pattern.elev_min_deg": -15.0,
+            "lidar.pattern.elev_max_deg": 15.0, "lidar.pattern.az_res_deg": 0.0,       # 0: the stack's az_res_deg
             "required_channels": ["odom", "imu"], "ready_timeout_s": 10.0}])
     nodes = [
         autonomy,

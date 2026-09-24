@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from medortrace.common.msgs import WorkflowEvent, WorkflowEventType as WT
+from medortrace.common.msgs import WorkflowEvent
+from medortrace.common.msgs import WorkflowEventType as WT
 from medortrace.common.rng import RngStreams
 from medortrace.world.scene import SceneSpec
 
@@ -101,8 +102,25 @@ def generate_workflow(spec: SceneSpec, cfg: dict, streams: RngStreams) -> Workfl
 
     # ---- 1. implant box opened onto the sterile back table ------------------
     t0 = float(R.uniform(0.06, 0.12) * T)
-    tasks["circulator"].append(StaffTask(t0 - 8.0, approach("cart_2:top", (0.0, -0.65)), 4.0, "fetch implant"))
-    move(t0 - 4.0, "implant_box_1", "cart_2:top", "hand:circulator", None)
+    implant_cart = "cart_2:top"
+    if hc.get("factor") == "CF-D":
+        # CF-D only (both arms): the implant is staged on cart_1 - the cart that
+        # is displaced in the cart_moved arm - and the staging is logged, so the
+        # robot has a verification leg to that cart before the implant is opened.
+        # Without it the mission may never bring the robot within sensor range
+        # of the cart and the drift / map-change question is unobservable.
+        implant_cart = "cart_1:top"
+        initial["implant_box_1"] = "elsewhere"
+        t_stage = float(R.uniform(2.0, 5.0))
+        truth.append(TruthMove(t_stage, "implant_box_1", "elsewhere", implant_cart, "workflow"))
+        events.append((WorkflowEvent(t_stage, WT.PLACE, "implant_box_1", "elsewhere", implant_cart,
+                                     reporter="circulating_nurse"), True))
+        # fetch (unlogged, at t0 - 4 s) only after the staging claim is due, so
+        # the claim is about a state that holds throughout its grace window
+        grace = float(wcfg.get("claim_grace_s", 25.0))
+        t0 = max(t0 + 0.2 * T, t_stage + 6.0 + grace + 12.0)
+    tasks["circulator"].append(StaffTask(t0 - 8.0, approach(implant_cart, (0.0, -0.65)), 4.0, "fetch implant"))
+    move(t0 - 4.0, "implant_box_1", implant_cart, "hand:circulator", None)
     bt_edge = spec.slot("back_table:tray").position[:2] + np.array([1.35, -0.25])
     tasks["circulator"].append(StaffTask(t0, bt_edge, 5.0, "open implant"))
     move(t0 + 5.0, "implant_box_1", "hand:circulator", "back_table:tray", WT.OPEN)
@@ -167,7 +185,9 @@ def generate_workflow(spec: SceneSpec, cfg: dict, streams: RngStreams) -> Workfl
     cup_edge = spec.slot("back_table:specimen_cup").position[:2] + np.array([0.95, -0.2])
     tasks["circulator"].append(StaffTask(tcirc - 6.0, cup_edge, 5.0, "collect specimen"))
     move(tcirc, "specimen_1", "back_table:specimen_cup", "hand:circulator", WT.HANDOFF)
-    tasks["circulator"].append(StaffTask(tcirc + 1.0, approach("specimen_counter:top", (0.0, 0.6)), 6.0, "label specimen"))
+    tasks["circulator"].append(
+        StaffTask(tcirc + 1.0, approach("specimen_counter:top", (0.0, 0.6)), 6.0, "label specimen")
+    )
     move(tcirc + 10.0, "specimen_1", "hand:circulator", "specimen_counter:top", WT.PLACE)
 
     # ---- 6. circulator & anesthetist background roaming ----------------------

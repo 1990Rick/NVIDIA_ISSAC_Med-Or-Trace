@@ -83,7 +83,7 @@ class StaffDriver:
         self.proxies.set_world_poses(np.column_stack([pos, np.full(len(pos), CAPSULE_Z)]), q)
         if self.characters is not None:  # pragma: no cover - people mode
             self.characters.set_world_poses(np.column_stack([pos, np.zeros(len(pos))]), q)
-            for (p, ch), s in zip(self._anim.items(), speeds if speeds is not None else np.zeros(len(pos))):
+            for (_p, ch), s in zip(self._anim.items(), speeds if speeds is not None else np.zeros(len(pos))):
                 try:
                     ch.set_variable("Action", "Walk" if s > 0.1 else "Idle")
                     ch.set_variable("Walk", float(s))

@@ -14,11 +14,14 @@ Static checks (always):
   * authored USD (rig + a registry scene): sensor frames, camera prim, articulation root, wheel drives;
   * RTX non-visual material tokens (``omni:simready:nonvisual:{base,coating,attributes}``) of every
     material against the vocabulary in ``medortrace.isaac.sensors`` (+ the alias the backend applies)
-    and physical consistency with the medortrace:* parameters (metals, radar-penetrable fabrics).
+    and physical consistency with the medortrace:* parameters (metals, radar-penetrable fabrics);
+  * the scenario's reflective faults (``specular_gain``, ``floor_wet``): the material edits the backend applies
+    (``medortrace.isaac.sensors.apply_reflective_faults``) and their non-visual tokens.
 
 Isaac Sim checks (unless ``--static-only``): open the scene with the rig, create every adapter of
 ``medortrace.isaac.sensors`` on the rig frames, step ``--frames`` rendered frames and print the resolved
-command / annotator names and the output shapes of every sensor.
+command / annotator names and the output shapes of every sensor.  A custom RTX profile that the release did not
+apply (5.x ``OmniLidar``/``OmniRadar`` prims) and radar frames without Doppler are reported as warnings.
 
 Exit code 1 if any check reports an ERROR (``--strict``: also on warnings).
 """
@@ -30,9 +33,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
-
 import _bootstrap  # noqa: F401
+import numpy as np
 from _common import DEFAULT_REGISTRY
 
 from medortrace.common.config import CONFIG_DIR, load_config, load_yaml
@@ -198,16 +200,46 @@ def check_usd(rep: Report, scenario_id: str, registry: str, work: Path) -> Path:
             rep.warn(f"nonvisual.consistency.{name}", f"base token {r['base']!r} vs visual metallic={m.metallic}")
         if m.radar_penetrable and metal:
             rep.warn(f"nonvisual.consistency.{name}", f"radar_penetrable but metallic base token {r['base']!r}")
+    check_reflective_faults(rep, st, ep)
     return scene
+
+
+def check_reflective_faults(rep: Report, st, ep) -> None:
+    """The material edits IsaacBackend.reset applies for the scenario's reflective faults (in memory, discarded)."""
+    from medortrace.isaac.sensors import apply_reflective_faults, nonvisual_report
+    fm = ep.faults
+    if fm.specular_gain == 1.0 and not fm.floor_wet:
+        rep.ok("faults.reflective", "no reflective faults in this scenario")
+        return
+    try:
+        rows = apply_reflective_faults(st, ep.materials, fm.specular_gain, fm.floor_wet)
+        wet_ok = not fm.floor_wet or any(r["fault"] == "floor_wet" for r in rows)
+        desc = "; ".join(f"{r['material'].split('/')[-1]}: roughness {r['roughness'][0]:.2f}->{r['roughness'][1]:.2f}"
+                         f", coating {r['coating'][1]}" for r in rows)
+        (rep.ok if rows and wet_ok else rep.err)(
+            "faults.reflective", f"specular_gain={fm.specular_gain}, floor_wet={fm.floor_wet}: "
+                                 f"{len(rows)} material edits ({desc})")
+        off = [r["material"] for r in nonvisual_report(st) if any("coating" in i for i in r["issues"])]
+        (rep.err if off else rep.ok)("faults.reflective.tokens", f"coating tokens off-vocabulary: {off}" if off
+                                     else "edited coating tokens are in the RTX vocabulary")
+    finally:
+        st.GetRootLayer().Reload()     # the authored scene stays as built (the backend edits its opened copy)
 
 
 # ---------------------------------------------------------------------------
 def isaac_checks(rep: Report, app, scene: Path, frames: int) -> None:  # pragma: no cover - Isaac only
     from medortrace.isaac.compat import open_stage, usd_stage, world_cls
     from medortrace.isaac.robot import find_articulation_root
-    from medortrace.isaac.sensors import (AcousticAdapter, CameraAdapter, ContactAdapter, ImuAdapter,
-                                          RtxLidarAdapter, RtxRadarAdapter, nonvisual_report,
-                                          normalize_nonvisual_tokens)
+    from medortrace.isaac.sensors import (
+        AcousticAdapter,
+        CameraAdapter,
+        ContactAdapter,
+        ImuAdapter,
+        RtxLidarAdapter,
+        RtxRadarAdapter,
+        nonvisual_report,
+        normalize_nonvisual_tokens,
+    )
     print(f"[medortrace] extensions: {json.dumps(getattr(app, '_medortrace_ext_status', {}))}")
     open_stage(str(scene), app)
     stage = usd_stage()
@@ -231,9 +263,17 @@ def isaac_checks(rep: Report, app, scene: Path, frames: int) -> None:  # pragma:
                      ("acoustic", lambda: AcousticAdapter(f"{base}/acoustic_link"))):
         try:
             adapters[name] = mk()
-            rep.ok(f"isaac.{name}", json.dumps(adapters[name].backend_info))
+            info = adapters[name].backend_info
+            rep.ok(f"isaac.{name}", json.dumps(info, default=str))
+            if info.get("profile_applied") is False:     # 5.x OmniSensor prim: the custom JSON profile was dropped
+                rep.warn(f"isaac.{name}.profile", f"requested {info['profile_requested']!r}, sensor model is "
+                         f"{info['profile_resolved']} ({info['prim_type']} prim)")
+            for w in getattr(adapters[name], "warnings", []):
+                rep.warn(f"isaac.{name}.warning", w)
         except Exception as ex:
-            rep.err(f"isaac.{name}", f"creation failed: {ex}")
+            (rep.warn if name == "radar" else rep.err)(f"isaac.{name}", f"creation failed: {ex}"
+                                                       + (" (the backend runs without radar)" if name == "radar"
+                                                          else ""))
     for _ in range(max(1, frames)):
         world.step(render=True)
 
@@ -250,7 +290,9 @@ def isaac_checks(rep: Report, app, scene: Path, frames: int) -> None:  # pragma:
     if "radar" in adapters:
         raw = adapters["radar"].ann.get_data() or {}
         fr = adapters["radar"].read(t, stamp)
-        rep.ok("isaac.radar.output", f"raw keys {sorted(raw)}; {len(fr.detections)} detections")
+        src = adapters["radar"].doppler_frames
+        msg = f"raw keys {sorted(raw)}; {len(fr.detections)} detections; radial velocity source {src}"
+        (rep.warn if src["zeros"] else rep.ok)("isaac.radar.output", msg)
     if "camera" in adapters:
         shapes = {}
         for k, an in adapters["camera"].ann.items():

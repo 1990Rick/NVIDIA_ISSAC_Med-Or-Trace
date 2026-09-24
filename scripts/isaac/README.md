@@ -59,7 +59,9 @@ config.
   with `meta.json:backend = "isaac"`.
 * `DIR/usd/`: the authored stage and robot rig.
 * `DIR/isaac_run.json`: enabled extensions, resolved sensor commands, annotators and render
-  products, the non-visual token rewrites that were applied, and the metrics.
+  products, the requested and resolved RTX profiles (`profile_applied`), sensor warnings, the
+  reflective-fault material edits and non-visual token rewrites that were applied, the radar's
+  per-frame Doppler source (`doppler_frames`), and the metrics.
 
 Backend options (`staff_mode`, `detector`, `drive`, ...) are set with
 `IsaacBackend.configure()` and are not part of the scenario config, so `cfg_hash` matches the
@@ -105,7 +107,8 @@ adapter that uses it. The newest name is tried first.
 | Assets root | `isaacsim.storage.native.get_assets_root_path` | `omni.isaac.nucleus` | `compat.assets_root_path` |
 | Extensions | `isaacsim.sensors.rtx`, `isaacsim.sensors.physics`, `isaacsim.robot.wheeled_robots`, `isaacsim.ros2.bridge` | `omni.isaac.sensor`, `omni.isaac.wheeled_robots`, `omni.isaac.ros2_bridge` | `compat.EXTENSION_ALIASES` |
 | RTX lidar annotator | `IsaacCreateRTXLidarScanBuffer` (5.x) | `RtxSensorCpuIsaacCreateRTXLidarScanBuffer` (4.x) | `sensors.LIDAR_ANNOTATORS` |
-| RTX radar annotator | `IsaacComputeRTXRadarPointCloud` (5.x) | `RtxSensorCpuIsaacComputeRTXRadarPointCloud` (4.x) | `sensors.RADAR_ANNOTATORS` |
+| RTX radar annotator | 5.x: `IsaacExtractRTXSensorPointCloudNoAccumulator` (cartesian `data` only; radial velocity and RCS decoded from the `GenericModelOutput` annotator buffer, or 0). 4.5: `IsaacComputeRTXRadarPointCloud` | `RtxSensorCpuIsaacComputeRTXRadarPointCloud` (4.x) | `sensors.RADAR_ANNOTATORS` (the 4.x annotators, which carry Doppler and RCS, are tried first) |
+| RTX sensor prims / profiles | 5.x: `OmniLidar`/`OmniRadar` prims, custom JSON profile only via `force_camera_prim=True` (deprecated camera prim with `sensorModelConfig`) | camera prim with `sensorModelConfig` | `sensors._create_rtx_sensor`, `sensors.sensor_config_info` |
 | RTX acoustic | `IsaacSensorCreateRtxAcoustic` / `IsaacSensorCreateAcoustic` (experimental) | none | `sensors.ACOUSTIC_COMMANDS` |
 | OmniGraph ROS 2 nodes | `isaacsim.ros2.bridge.*`, `isaacsim.core.nodes.*`, `isaacsim.robot.wheeled_robots.DifferentialController` | `omni.isaac.ros2_bridge.*`, `omni.isaac.core_nodes.*`, `omni.isaac.wheeled_robots.*` | `compat.ros2_node_namespaces` |
 | camera_info publisher | `ROS2CameraInfoHelper` | `ROS2CameraHelper(type="camera_info")` | `ros2_bridge.build_ros2_graph` (automatic fallback) |
@@ -138,6 +141,14 @@ adapter that uses it. The newest name is tried first.
   `medortrace/isaac/sensors.py`. The backend rewrites project tokens that are outside the
   vocabulary in the opened stage (`steel_stainless` → `steel`, `glass` → `clear_glass`). The
   authored USD is left unchanged.
+* **Reflective faults.** The lite simulator scales every material's specular weight by
+  `faults.specular_gain` and makes a wet floor specular (`faults.floor_wet`). The Isaac backend
+  and the dataset generator apply the same faults to the opened stage
+  (`sensors.apply_reflective_faults`): roughness divided by the gain, a clear-coat non-visual
+  coating once the gained weight reaches 0.5, and a separate `floor_vinyl_wet` material
+  (roughness ≤ 0.05, clear coat) bound to the floor for rendering. The physics binding keeps the
+  dry friction. The edits are listed in `isaac_run.json:reflective_faults`, and
+  `validate_sensor_configs.py --static-only` prints them for the default `reflective__0000` scene.
 
 ## Known limitations
 * None of the Isaac-side code has run inside Isaac Sim in this repository's CI; it has only been
@@ -147,9 +158,23 @@ adapter that uses it. The newest name is tried first.
   Confirm them with `validate_sensor_configs.py` on your release.
 * **Custom lidar/radar profiles.** These are registered through the carb settings
   `/app/sensors/nv/{lidar,radar}/profileBaseFolder` and created with
-  `IsaacSensorCreateRtx{Lidar,Radar}(config=<profile>)`. Isaac Sim 5.x moves RTX sensors to USD
-  `OmniLidar`/`OmniRadar` prims and may ignore JSON profiles. If the resolved profile is not
-  `rtx_lidar_or16`, author the sensor attributes on the prim instead.
+  `IsaacSensorCreateRtx{Lidar,Radar}(config=<profile>)`. Isaac Sim 5.x creates USD
+  `OmniLidar`/`OmniRadar` prims and matches `config` only against NVIDIA's shipped sensor USDs, so
+  a custom JSON profile is silently replaced by the default model. The adapters therefore pass
+  `force_camera_prim=True` where the command accepts it: this deprecated camera-prim path still
+  writes `sensorModelConfig`. They then read the model back from the created prim.
+  `backend_info` reports `profile_requested`, `profile_resolved` and `profile_applied`, and a
+  warning is printed and recorded (`sensor_warnings`) when the profile was not applied. In that
+  case the lidar ring grid follows the prim's own emitter elevations. `validate_sensor_configs.py`
+  reports a mismatch as a warning. Once a release removes the camera-prim path, author the
+  profile as `omni:sensor:*` attributes on the prim instead.
+* **Radar on 5.x.** Radar creation is non-fatal: if it fails, the episode runs without radar and
+  the reason is recorded. With the 5.x cartesian extractor, radial velocity and RCS come from the
+  `GenericModelOutput` buffer. It is decoded only from host memory, so the backend sets
+  `/app/sensors/nv/radar/outputBufferOnGPU = false`, and only when the element count matches the
+  extracted points. Otherwise both are 0, and `backend_info.doppler_frames` shows how many frames
+  had real Doppler. `OmniLidar`/`OmniRadar` prims get
+  `omni:sensor:Core:outputFrameOfReference = SENSOR` so their points are sensor-frame.
 * **Acoustic.** The measurement always comes from the calibrated PhysX echo model. The RTX
   acoustic prim is created only when the experimental extension exists, and only for
   visualisation.

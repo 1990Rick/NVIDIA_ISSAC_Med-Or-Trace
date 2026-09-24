@@ -170,9 +170,11 @@ class XformGroup:
 def open_stage(path: str, app=None, max_updates: int = 600) -> None:
     """Open a USD stage in Kit and wait until it has finished loading."""
     try:
-        from isaacsim.core.utils.stage import is_stage_loading, open_stage as _open  # type: ignore
+        from isaacsim.core.utils.stage import is_stage_loading  # type: ignore
+        from isaacsim.core.utils.stage import open_stage as _open
     except ImportError:  # pragma: no cover - legacy
-        from omni.isaac.core.utils.stage import is_stage_loading, open_stage as _open  # type: ignore
+        from omni.isaac.core.utils.stage import is_stage_loading  # type: ignore
+        from omni.isaac.core.utils.stage import open_stage as _open
     if not _open(str(path)):
         raise RuntimeError(f"could not open USD stage {path}")
     n = 0

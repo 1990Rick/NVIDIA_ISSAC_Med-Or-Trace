@@ -25,9 +25,14 @@ def deep_merge(base: dict, override: dict | None) -> dict:
 
 
 def load_yaml(path: str | Path) -> dict:
+    """Load YAML from ``path``: as given (absolute / cwd-relative), else relative to
+    ``configs/``, else relative to the repository root (``configs/...`` paths used in
+    scenario files must not depend on the working directory)."""
     p = Path(path)
     if not p.is_absolute() and not p.exists():
-        p = CONFIG_DIR / p
+        p = CONFIG_DIR / path
+        if not p.exists() and (REPO_ROOT / path).exists():
+            p = REPO_ROOT / path
     with open(p) as f:
         return yaml.safe_load(f) or {}
 

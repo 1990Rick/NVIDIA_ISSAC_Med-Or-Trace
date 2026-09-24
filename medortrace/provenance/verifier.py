@@ -6,6 +6,10 @@ turns weak evidence into an assertion:
 * a verdict requires *direct* sensor evidence about the claimed slot (or an
   identity read of the item elsewhere) gathered after the reference time -
   a workflow log entry alone is not enough (``require_direct_evidence``);
+* that direct evidence must point the same way as the verdict: VERIFIED needs
+  net support for the claimed slot, REFUTED net contradiction.  A glimpse of
+  the slot that failed to see the item is not a reason to assert a posterior
+  that only the log keeps high;
 * posteriors are fixed-lag smoothed: evidence gathered between ``t_ref`` and
   the decision time is applied to the belief snapshot at ``t_ref`` as long as
   no reported event moved the item in between;
@@ -105,12 +109,14 @@ class ClaimVerifier:
                 if r.item_id != c.item_id or r.sensor == "workflow" or r.t > oc.moved_t:
                     continue
                 oc.acc_llr += r.llr
+                # a tag read is recorded as "<frame>:tag" but only the camera frame is a provenance node
+                eid = r.evidence_id.removesuffix(":tag") if r.sensor == "camera_tag" else r.evidence_id
                 if abs(r.llr[k]) > 0.05:
                     oc.direct = True
-                    oc.contributions[r.evidence_id] = oc.contributions.get(r.evidence_id, 0.0) + float(r.llr[k])
+                    oc.contributions[eid] = oc.contributions.get(eid, 0.0) + float(r.llr[k])
                 if r.sensor == "camera_tag" and r.llr.max() > 1.0:
                     oc.direct = True
-                    oc.contributions[r.evidence_id] = oc.contributions.get(r.evidence_id, 0.0) + float(r.llr[k] - r.llr.max())
+                    oc.contributions[eid] = oc.contributions.get(eid, 0.0) + float(r.llr[k] - r.llr.max())
             oc.rec_ptr = len(recs)
             # fixed-lag smoothing: snapshot at t_ref x evidence gathered until the
             # item was next reported moved (later evidence is about a different state)
@@ -122,14 +128,19 @@ class ClaimVerifier:
             tau_v = min(0.99, self.tau_v + (0.05 if self.degraded else 0.0))
             tau_r = max(0.01, self.tau_r - (0.05 if self.degraded else 0.0))
             decided = None
+            support = sum(oc.contributions.values())          # net direct LLR for the claimed slot
             if oc.direct or not self.require_direct:
-                if p >= tau_v:
+                if p >= tau_v and (support > 0.0 or not self.require_direct):
                     decided = (Verdict.VERIFIED, "posterior above verify threshold with direct evidence")
-                elif p <= tau_r:
+                elif p <= tau_r and (support < 0.0 or not self.require_direct):
                     decided = (Verdict.REFUTED, "posterior below refute threshold with direct evidence")
             if decided is None and t >= c.t_due:
-                reason = "no direct sensor evidence of the claimed slot" if not oc.direct else \
-                    f"ambiguous evidence (p={p:.2f})"
+                if not oc.direct:
+                    reason = "no direct sensor evidence of the claimed slot"
+                elif (p >= tau_v and support <= 0.0) or (p <= tau_r and support >= 0.0):
+                    reason = f"direct evidence disagrees with the smoothed posterior (p={p:.2f})"
+                else:
+                    reason = f"ambiguous evidence (p={p:.2f})"
                 decided = (Verdict.ABSTAIN, reason)
             if decided is None or (not self.early and t < c.t_due):
                 continue

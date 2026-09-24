@@ -66,6 +66,7 @@ class OccupancyBelief:
             prior[inside[:, :, None] & zmask[None, None, :]] = l_occ
         self.prior = prior
         self.static = prior.copy()
+        self._prior_version = getattr(self, "_prior_version", 0) + 1
 
     def _idx(self, pts: np.ndarray):
         ijk = np.floor(pts / self.res).astype(int)
@@ -150,6 +151,26 @@ class OccupancyBelief:
             return np.zeros((self.nx, self.ny), dtype=np.float32)
         p = self.column_occupancy(z_lo, z_hi)
         return (binary_entropy(p) + np.clip(self.ambiguous, 0, 1)).astype(np.float32)
+
+    def excess_uncertainty_field(self, z_lo: float = 0.1, z_hi: float = 1.6) -> np.ndarray:
+        """2D map in bits of uncertainty *beyond the surveyed prior*: column entropy
+        minus the prior's column entropy (clipped at 0) plus the ambiguous mass.
+
+        A voxel the lidar has never observed (e.g. low voxels next to the robot,
+        below the lowest ring) keeps the prior's entropy - H(sigmoid(l_free)) =
+        0.68 bits for surveyed free space - which is expected, not a hazard.
+        Conflicting evidence (p -> 0.5) or ghost-suspect returns raise it.
+        """
+        if self.deterministic:
+            return np.zeros((self.nx, self.ny), dtype=np.float32)
+        k0, k1 = max(1, int(np.ceil(z_lo / self.res - 1e-9))), int(np.ceil(z_hi / self.res))
+        key = (k0, k1)
+        if getattr(self, "_prior_col_key", None) != (key, getattr(self, "_prior_version", 0)):
+            p0 = (1 / (1 + np.exp(-self.prior[:, :, k0:k1]))).max(axis=2)
+            self._prior_col_h = binary_entropy(p0)
+            self._prior_col_key = (key, getattr(self, "_prior_version", 0))
+        h = binary_entropy(self.column_occupancy(z_lo, z_hi))
+        return (np.clip(h - self._prior_col_h, 0, 1) + np.clip(self.ambiguous, 0, 1)).astype(np.float32)
 
     def unknown_fraction(self) -> float:
         return float(1.0 - self.observed[:, :, 1:16].mean())

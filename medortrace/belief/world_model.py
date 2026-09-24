@@ -82,6 +82,19 @@ def scan_match(pts: np.ndarray, pivot: np.ndarray, edt: np.ndarray, grid: GridSp
     return ScanMatch(cost0 if cost0 is not None else best[0], *best)
 
 
+def _majority(xs: list):
+    """Most frequent element; ties go to the most recent one (deterministic,
+    unlike ``max(set(xs), key=xs.count)`` whose tie-break follows the
+    per-process string hash seed)."""
+    if not xs:
+        return None
+    counts: dict = {}
+    for x in xs:
+        counts[x] = counts.get(x, 0) + 1
+    best = max(counts.values())
+    return next(x for x in reversed(xs) if counts[x] == best)
+
+
 class ChangeDiagnoser:
     def __init__(self, prior_map: list[SceneObject], window: int = 10, min_residual_frac: float = 0.02):
         self.prior = prior_map
@@ -103,21 +116,26 @@ class ChangeDiagnoser:
         m = scan_match(pts[sub], pose[:2], edt, grid)
         self.last_match = m
         frac = float(res.mean())
-        # concentration of the unexplained points around one movable prior object
+        # excess concentration of the unexplained points around one movable prior
+        # object: the share of residual points near it minus the share of *all*
+        # scan points near it.  A pose error leaves residuals on every surface in
+        # view (excess ~ 0 even when the robot looks mostly at one cart); a moved
+        # object concentrates them (excess >> 0).
         rp = pts[res]
-        conc, near = 0.0, None
+        conc, near, cent = 0.0, None, None
         if len(rp) > 5:
-            best = 0
             for o in self.prior:
                 if not o.movable:
                     continue
-                k = int((np.linalg.norm(rp[:, :2] - o.box.center[:2], axis=1) < 1.2).sum())
-                if k > best:
-                    best, near = k, o
-            conc = best / len(rp)
+                in_r = np.linalg.norm(rp[:, :2] - o.box.center[:2], axis=1) < 1.2
+                if in_r.sum() < 5:
+                    continue
+                in_all = np.linalg.norm(pts[:, :2] - o.box.center[:2], axis=1) < 1.2
+                ex = float(in_r.mean() - in_all.mean())
+                if ex > conc:
+                    conc, near, cent = ex, o, rp[in_r, :2].mean(0)
         self.hist.append({"t": t, "frac": frac, "gain": m.gain, "mag": m.magnitude, "conc": conc,
-                          "obj": near.name if near else None,
-                          "cent": rp[:, :2].mean(0) if len(rp) else None, "nis": nis_avg})
+                          "obj": near.name if near else None, "cent": cent, "nis": nis_avg})
         if len(self.hist) < max(3, self.window // 2):
             return None
         H = list(self.hist)
@@ -132,10 +150,10 @@ class ChangeDiagnoser:
         # log-odds style evidence for drift vs map change
         s_drift = 3.0 * np.clip((gain - 0.2) / 0.3, 0, 1.5) + 2.0 * np.clip((mag - 0.05) / 0.15, 0, 1) \
             + 0.5 * np.clip((np.median([h["nis"] for h in H]) - 4.0) / 6.0, 0, 1)
-        s_change = 2.5 * np.clip((0.25 - gain) / 0.2, 0, 1.2) + 2.0 * concm
+        s_change = 2.5 * np.clip((0.25 - gain) / 0.2, 0, 1.2) + 3.0 * concm
         p_change = float(1 / (1 + np.exp(s_drift - s_change)))
         names = [h["obj"] for h in H if h["obj"]]
-        obj = max(set(names), key=names.count) if names else None
+        obj = _majority(names)
         if p_change > 0.75 and obj:
             cents = np.array([h["cent"] for h in H if h["obj"] == obj and h["cent"] is not None])
             o = next(o for o in self.prior if o.name == obj)
@@ -177,6 +195,8 @@ class ChangeDiagnoser:
         if not self.diagnoses:
             return {"cause": "none", "prob": 0.0}
         causes = [d.cause for d in self.diagnoses]
-        c = max(set(causes), key=causes.count)
+        c = _majority(causes)
+        objs = [d.object for d in self.diagnoses if d.cause == c and d.object]
         return {"cause": c, "prob": float(np.mean([d.prob for d in self.diagnoses if d.cause == c])),
-                "first_t": float(next(d.t for d in self.diagnoses if d.cause == c)), "n": len(self.diagnoses)}
+                "first_t": float(next(d.t for d in self.diagnoses if d.cause == c)), "n": len(self.diagnoses),
+                "object": _majority(objs)}

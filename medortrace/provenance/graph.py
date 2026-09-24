@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -58,6 +58,8 @@ class Edge:
 def _canon(o: Any) -> Any:
     if isinstance(o, np.ndarray):
         return [round(float(x), 6) for x in o.ravel()]
+    if isinstance(o, np.bool_):                 # not JSON-serialisable; must hash like a Python bool
+        return bool(o)
     if isinstance(o, (np.floating, float)):
         return round(float(o), 6)
     if isinstance(o, (np.integer,)):
@@ -151,7 +153,13 @@ class ProvenanceGraph:
         ent, act, ag = {}, {}, {}
         for nid in self.order:
             n = self.nodes[nid]
-            rec = {"prov:type": n.kind, "mot:t": n.t, "mot:hash": n.hash, "mot:prev": n.prev_hash, **{f"mot:{k}": v for k, v in n.attrs.items()}}
+            rec = {
+                "prov:type": n.kind,
+                "mot:t": n.t,
+                "mot:hash": n.hash,
+                "mot:prev": n.prev_hash,
+                **{f"mot:{k}": v for k, v in n.attrs.items()},
+            }
             (ag if n.kind == "agent" else act if n.kind == "activity" else ent)[nid] = rec
         rels = {"wasDerivedFrom": {}, "wasAttributedTo": {}, "mot:contradicts": {}}
         for i, e in enumerate(self.edges):

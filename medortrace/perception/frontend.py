@@ -21,7 +21,7 @@ from scipy.ndimage import distance_transform_edt, label
 
 from medortrace.common.msgs import CameraFrame, LidarScan, RadarFrame
 from medortrace.planning.grid import GridSpec, rasterize_boxes
-from medortrace.sim.raycast import NO_HIT, RayScene, cast
+from medortrace.sim.raycast import RayScene, cast
 from medortrace.world.materials import MATERIALS
 from medortrace.world.scene import SceneObject, Slot
 
@@ -49,7 +49,9 @@ class LidarProposal:
 
 
 class LidarFrontEnd:
-    def __init__(self, prior_map: list[SceneObject], room: tuple[float, float, float], use_ghost_reasoning: bool = True):
+    def __init__(
+        self, prior_map: list[SceneObject], room: tuple[float, float, float], use_ghost_reasoning: bool = True
+    ):
         self.objs = prior_map
         self.scene = RayScene(np.array([o.box.center for o in prior_map]), np.array([o.box.half for o in prior_map]),
                               np.array([o.box.yaw for o in prior_map]), np.zeros((0, 2)), np.zeros(0), np.zeros(0),
@@ -81,7 +83,13 @@ class LidarFrontEnd:
         ghost = np.zeros(n)
         carve = rng.copy()
         W, D, H = self.room
-        outside = (pts[:, 0] < -0.15) | (pts[:, 1] < -0.15) | (pts[:, 0] > W + 0.15) | (pts[:, 1] > D + 0.15) | (pts[:, 2] < -0.15)
+        outside = (
+            (pts[:, 0] < -0.15)
+            | (pts[:, 1] < -0.15)
+            | (pts[:, 0] > W + 0.15)
+            | (pts[:, 1] > D + 0.15)
+            | (pts[:, 2] < -0.15)
+        )
         if self.use_ghost and n:
             h = cast(self.scene, np.repeat(origin[None], n, 0), dirs, t_max=25.0)
             behind = np.isfinite(h.t) & (rng > h.t + 0.3) & (h.obj >= 0)

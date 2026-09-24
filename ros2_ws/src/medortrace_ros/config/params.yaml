@@ -37,12 +37,15 @@ medortrace_autonomy:
       rcs_is_db: false
     lidar:
       sensor_height: -1.0              # <= 0: sensors.lidar.mount_height of the mission cfg (rig.yaml lidar_link z)
-      fill_no_return_rays: false       # true for driver clouds without no-return rays (pattern below)
-      pattern:
+      regrid_to_pattern: false         # true for x,y,z clouds (drivers, Isaac RTX helper): re-bin them onto the
+                                       # ray grid below, nearest return per cell, empty cells = no-return rays
+      pattern:                         # rings / elevations: the physical sensor (OR16)
         rings: 16
         elev_min_deg: -15.0
         elev_max_deg: 15.0
-        az_res_deg: 0.2
+        az_res_deg: 0.0                # <= 0: sensors.lidar.az_res_deg of the mission cfg (2 deg -> 16 x 180 rays,
+                                       # the grid IsaacBackend uses; the sensor's native 0.2 deg is 10x the rays)
+        max_range: 0.0                 # <= 0: sensors.lidar.max_range of the mission cfg
     max_age:                           # assembler staleness limits [s] (receive age); see medortrace_ros/assembler.py
       lidar: 0.5
       camera: 0.5

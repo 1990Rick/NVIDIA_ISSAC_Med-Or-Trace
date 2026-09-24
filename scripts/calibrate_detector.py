@@ -27,16 +27,14 @@ import hashlib
 import sys
 from pathlib import Path
 
+import _bootstrap  # noqa: F401
 import numpy as np
 import yaml
-
-import _bootstrap  # noqa: F401
 
 from medortrace.common.config import REPO_ROOT
 from medortrace.common.rng import stable_hash
 from medortrace.eval.metrics import ece
-from medortrace.perception.calibration import (calibrate_lite, fit_temperature, lite_validation_set,
-                                               soft_confusion)
+from medortrace.perception.calibration import calibrate_lite, fit_temperature, lite_validation_set, soft_confusion
 from medortrace.perception.frontend import CLASSES, softmax
 
 
@@ -44,6 +42,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", choices=["lite", "replicator"], required=True)
     ap.add_argument("--detections", default=None, help="npz with logits+labels (required for --source replicator)")
+    ap.add_argument("--logits-key", default="logits",
+                    help="npz logits array ('roi_logits': box-head logits at GT boxes; labels/groups use the prefix)")
     ap.add_argument("--holdout", type=float, default=0.3, help="held-out fraction for the report (replicator)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--bins", type=int, default=15)
@@ -63,12 +63,15 @@ def reliability(logits: np.ndarray, labels: np.ndarray, T: float = 1.0, bins: in
             "mean_confidence": float(conf.mean())}
 
 
-def load_detections(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+def load_detections(path: str | Path, logits_key: str = "logits"
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     z = np.load(path, allow_pickle=False)
-    if "logits" not in z or "labels" not in z:
-        raise SystemExit(f"{path}: expected arrays 'logits' and 'labels', found {sorted(z.files)}")
-    logits = np.asarray(z["logits"], float)
-    labels = np.asarray(z["labels"]).astype(int)
+    prefix = logits_key[: -len("logits")] if logits_key.endswith("logits") else ""
+    labels_key, groups_key = f"{prefix}labels", f"{prefix}groups"
+    if logits_key not in z or labels_key not in z:
+        raise SystemExit(f"{path}: expected arrays {logits_key!r} and {labels_key!r}, found {sorted(z.files)}")
+    logits = np.asarray(z[logits_key], float)
+    labels = np.asarray(z[labels_key]).astype(int)
     if "classes" in z:
         names = [str(c) for c in z["classes"]]
         if names != CLASSES:
@@ -79,11 +82,12 @@ def load_detections(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
             logits = logits[:, order]
             remap = np.full(len(names), -1)
             remap[order] = np.arange(len(CLASSES))
-            labels = remap[labels]
+            ok = (labels >= 0) & (labels < len(names))
+            labels = np.where(ok, remap[np.clip(labels, 0, len(names) - 1)], -1)
     if logits.ndim != 2 or logits.shape[1] != len(CLASSES) or len(labels) != len(logits):
         raise SystemExit(f"{path}: logits {logits.shape} / labels {labels.shape} do not match {len(CLASSES)} classes")
     keep = (labels >= 0) & (labels < len(CLASSES)) & np.all(np.isfinite(logits), axis=1)
-    groups = np.asarray(z["groups"]).astype(str) if "groups" in z else None
+    groups = np.asarray(z[groups_key]).astype(str) if groups_key in z else None
     return logits[keep], labels[keep], (groups[keep] if groups is not None else None)
 
 
@@ -111,7 +115,7 @@ def main(argv=None) -> int:
     else:
         if not a.detections:
             raise SystemExit("--source replicator needs --detections FILE (from scripts/train_detector.py --eval)")
-        logits, labels, groups = load_detections(a.detections)
+        logits, labels, groups = load_detections(a.detections, a.logits_key)
         if len(labels) < 2 * len(CLASSES):
             raise SystemExit(f"only {len(labels)} labelled detections in {a.detections}: too few to calibrate")
         hold = group_holdout(len(labels), groups, a.holdout, a.seed)
@@ -127,6 +131,7 @@ def main(argv=None) -> int:
             print(f"[calibrate] WARNING: no fit samples for {missing}; their confusion rows are identity")
         sha = hashlib.sha256(Path(a.detections).read_bytes()).hexdigest()[:16]
         src = {"source": "replicator", "detections": str(a.detections), "detections_sha256": sha,
+               "logits_key": a.logits_key,
                "holdout_frac": a.holdout, "grouped": groups is not None}
     before = reliability(lg, lb, 1.0, a.bins)
     after = reliability(lg, lb, T, a.bins)

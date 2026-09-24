@@ -31,6 +31,9 @@ import numpy as np
 NEAR_COLLISION_M = 0.3
 ROBOT_R = 0.28
 HUMAN_R = 0.25
+LIDAR_MOUNT_Z = 0.9          # sensors_lite.LidarConfig.mount_height
+LOS_RANGE_M = 8.0            # beyond this a 0.7 m cart gets too few returns to explain
+CFD_MIN_LOS_S = 3.0          # seconds of line of sight for a displaced cart to count as observable
 
 
 def ece(p: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
@@ -163,12 +166,54 @@ def compute_metrics(ep, truth: TruthLog, stack, verdicts: list, backend, operato
         "keepout_margin_violation_s": float(np.sum(truth.in_keepout_margin) * dt),
         "ghost_precision": float(tp / (tp + fp)) if tp + fp else float("nan"),
         "ghost_recall": float(tp / (tp + fn)) if tp + fn else float("nan"),
-        "loc_error_mean_m": float(np.mean([np.linalg.norm(s.pose_est[:2] - r[:2]) for s, r in zip(stack.telemetry, R)])),
+        "loc_error_mean_m": float(
+            np.mean([np.linalg.norm(s.pose_est[:2] - r[:2]) for s, r in zip(stack.telemetry, R)])
+        ),
         "loc_error_max_m": float(np.max([np.linalg.norm(s.pose_est[:2] - r[:2]) for s, r in zip(stack.telemetry, R)])),
         "distance_travelled_m": float(np.sum(np.linalg.norm(np.diff(R[:, :2], axis=0), axis=1))) if len(R) > 1 else 0.0,
     }
     m.update(hidden_cause_outcome(ep, vt, stack, truth))
     return m
+
+
+def _cart_line_of_sight_seconds(ep, truth: TruthLog, obj_name: str, face_z: tuple = (0.5, 0.85)) -> float:
+    """Seconds (1 Hz truth samples) with lidar line of sight to ``obj_name``.
+
+    Rays go from the lidar origin to five points on the object (centre and the
+    four face midpoints) at each height in ``face_z``; a sample counts if any
+    ray reaches the object first (static boxes of the true scene + people as
+    cylinders) within ``LOS_RANGE_M``.
+    """
+    from medortrace.common.geometry import rot2
+    from medortrace.sim.raycast import RayScene, segments_blocked
+
+    objs = ep.spec.objects
+    k = next((i for i, o in enumerate(objs) if o.name == obj_name), None)
+    if k is None or not truth.t:
+        return 0.0
+    box = objs[k].box
+    Rw = rot2(box.yaw)
+    offs = np.array([[0, 0], [box.half[0], 0], [-box.half[0], 0], [0, box.half[1]], [0, -box.half[1]]]) * 0.95
+    xy = box.center[:2] + offs @ Rw.T
+    tgt = np.vstack([np.c_[xy, np.full(len(xy), z)] for z in face_z])
+    bc = np.array([o.box.center for o in objs])
+    bh = np.array([o.box.half for o in objs])
+    by = np.array([o.box.yaw for o in objs])
+    T = np.array(truth.t)
+    step = max(1, int(round(1.0 / max(float(np.median(np.diff(T))) if len(T) > 1 else 1.0, 1e-3))))
+    seen = 0
+    for i in range(0, len(T), step):
+        r = np.asarray(truth.robot[i], float)
+        o = np.array([r[0] + 0.1 * np.cos(r[2]), r[1] + 0.1 * np.sin(r[2]), LIDAR_MOUNT_Z])
+        if np.min(np.linalg.norm(tgt[:, :2] - o[:2], axis=1)) > LOS_RANGE_M:
+            continue
+        ppl = np.asarray(truth.agents[i], float).reshape(-1, 2)
+        sc = RayScene(bc, bh, by, ppl, np.full(len(ppl), HUMAN_R), np.full(len(ppl), 1.75),
+                      ceiling=float(ep.spec.room[2]))
+        a = np.repeat(o[None], len(tgt), 0)
+        blocked = segments_blocked(sc, a, tgt, own=np.full(len(tgt), k), own_tol=0.6)
+        seen += int(not blocked.all())
+    return float(seen) * step * (float(np.median(np.diff(T))) if len(T) > 1 else 1.0)
 
 
 def _fault_at(ep, t: float) -> bool:
@@ -221,6 +266,19 @@ def hidden_cause_outcome(ep, vt, stack, truth) -> dict:
     elif fac == "CF-D":
         s = stack.diag.summary()
         out["cfd_diagnosis"] = s["cause"]
+        out["cfd_object"] = s.get("object") or "none"
         want = "loc_drift" if val == "loc_drift" else "map_change"
         out["cfd_correct"] = float(s["cause"] == want)
+        if val != "loc_drift":
+            # a map change attributed to the wrong object is not a correct diagnosis
+            out["cfd_object_correct"] = float(s["cause"] == want and s.get("object") == "cart_1")
+        # observability of the hidden cause: drift corrupts every scan once it
+        # starts; a displaced cart is only observable if the lidar had line of
+        # sight to it (truth poses and people, 1 Hz samples, within LOS_RANGE_M)
+        R = np.array(truth.robot)
+        cart = ep.spec.object("cart_1").box
+        out["cfd_min_dist_cart_m"] = float(np.min(cart.distance_xy(R[:, :2]))) if len(R) else float("inf")
+        los_s = _cart_line_of_sight_seconds(ep, truth, "cart_1")
+        out["cfd_cart_los_s"] = los_s
+        out["cfd_observable"] = 1.0 if val == "loc_drift" else float(los_s >= CFD_MIN_LOS_S)
     return out

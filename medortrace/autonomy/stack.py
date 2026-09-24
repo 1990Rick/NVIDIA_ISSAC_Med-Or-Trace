@@ -93,6 +93,8 @@ class StepTelemetry:
 
 
 class AutonomyStack:
+    SUSPECT_HOLD_S = 15.0      # displaced-anchor cue: withhold negative camera evidence this long
+
     def __init__(self, inputs: StackInputs, cfg: dict):
         self.cfg = cfg
         a = cfg.get("autonomy", {})
@@ -130,12 +132,21 @@ class AutonomyStack:
         self.dwell_s = float(a.get("viewpoint_dwell_s", 2.0))
         self.use_scan_matching = a.get("use_scan_matching", True)
         self._arrived_t = None
-        self.items = ItemBelief(inp.items, inp.slots, inp.initial_placement,
-                                params={**cfg.get("belief", {}), "use_temporal_model": a.get("use_temporal_model", True),
-                                        **({"soft_confusion": calib["soft_confusion"]} if "soft_confusion" in calib else {})})
+        self.items = ItemBelief(
+            inp.items,
+            inp.slots,
+            inp.initial_placement,
+            params={
+                **cfg.get("belief", {}),
+                "use_temporal_model": a.get("use_temporal_model", True),
+                **({"soft_confusion": calib["soft_confusion"]} if "soft_confusion" in calib else {}),
+            },
+        )
         self.prov = ProvenanceGraph()
         self.verifier = ClaimVerifier(self.items, self.prov, **cfg.get("verifier", {}))
         self.diag = ChangeDiagnoser(inp.prior_map)
+        self._movable = {o.name for o in inp.prior_map if o.movable}
+        self._suspect_slot_t: dict[int, float] = {}   # slot index -> last displaced-anchor cue
         self.vis = VisibilityModel(inp.prior_map, inp.slots, self.cam_cfg, inp.room[2])
         nbv_w = {}
         wpath = a.get("nbv_weights")
@@ -191,7 +202,6 @@ class AutonomyStack:
         pose = self.ekf.x.copy()
         self.poses.add(t, pose)
         # ---------------- lidar -------------------------------------------------
-        n_static = 0
         if b.lidar is not None and "lidar" in self.modalities:
             tm = self.sync.correct("lidar", b.lidar.header.stamp, b.lidar.header.recv_stamp)
             if tm is not None:
@@ -219,11 +229,21 @@ class AutonomyStack:
                 if lp.gt_ghost is not None:
                     pred = lp.ghost_prob > 0.5
                     g = lp.gt_ghost.astype(bool)
-                    self._ghost_conf += np.array([(pred & g).sum(), (pred & ~g).sum(), (~pred & g).sum(), (~pred & ~g).sum()])
+                    self._ghost_conf += np.array(
+                        [(pred & g).sum(), (pred & ~g).sum(), (~pred & g).sum(), (~pred & ~g).sum()]
+                    )
                 if self._seq % 5 == 0:
-                    self.prov.add_evidence(f"lidar:{b.lidar.header.seq}", t, "lidar",
-                                           {"n_points": len(lp.points), "n_ghost_suspect": int((lp.ghost_prob > 0.5).sum()),
-                                            "n_residual": int(lp.residual.sum())}, pose)
+                    self.prov.add_evidence(
+                        f"lidar:{b.lidar.header.seq}",
+                        t,
+                        "lidar",
+                        {
+                            "n_points": len(lp.points),
+                            "n_ghost_suspect": int((lp.ghost_prob > 0.5).sum()),
+                            "n_residual": int(lp.residual.sum()),
+                        },
+                        pose,
+                    )
         self.occ.decay(dt)
         # ---------------- radar --------------------------------------------------
         metal_hits = np.zeros(len(self.inp.slots))
@@ -303,7 +323,9 @@ class AutonomyStack:
         return m
 
     def _near_sterile_staff(self, xy):
-        homes = np.array([self.tracker.staff_homes[n] for n in self.sterile_staff if n in self.tracker.staff_homes]).reshape(-1, 2)
+        homes = np.array(
+            [self.tracker.staff_homes[n] for n in self.sterile_staff if n in self.tracker.staff_homes]
+        ).reshape(-1, 2)
         if len(homes) == 0:
             return np.zeros(len(xy), dtype=bool)
         return np.min(np.linalg.norm(xy[:, None] - homes[None], axis=2), axis=1) < 0.6
@@ -371,6 +393,24 @@ class AutonomyStack:
         classes = {st.spec.cls for st in self.items.items.values()}
         haze_est = 0.05
         pdc = self.vis.slot_pd_classes(p_meas[:2], p_meas[2], people_xy, self.occ, classes, hand_owner, haze_est)
+        # displaced-anchor guard: a confident detection outside every slot's
+        # association gate but close to a slot on a *movable* prior object (a
+        # cart moved since the survey) means that slot's surveyed position may
+        # be stale.  Until the change diagnoser re-anchors the object, "nothing
+        # seen at the surveyed position" is not evidence of absence there.
+        for k in np.flatnonzero(cp.slot_idx < 0):
+            if cp.probs[k].max() < 0.5 and not cp.tag[k]:
+                continue
+            for j, s in enumerate(self.inp.slots):
+                if s.anchor not in self._movable or s.hidden_from_camera or not np.all(np.isfinite(s.position)):
+                    continue
+                dxy = np.linalg.norm(s.position[:2] - cp.world[k, :2])
+                if dxy < 1.2 and abs(s.position[2] - cp.world[k, 2]) < 0.35:
+                    self._suspect_slot_t[j] = t
+        for j, ts in self._suspect_slot_t.items():
+            if t - ts < self.SUSPECT_HOLD_S:
+                for c in pdc:
+                    pdc[c][j] = 0.0
         counts = {c: np.zeros(S) for c in CLASSES}
         tag_reads = []
         for k in range(len(cp.slot_idx)):
@@ -416,7 +456,7 @@ class AutonomyStack:
                 pd[k] = min(1 / (1 + np.exp(-(snr - 3.0) / 2.0)), 0.95) / max(self.items.radar_pd, 1e-3)
         # associate each static metallic return to its nearest slot of any kind;
         # only returns whose nearest slot is an evidence slot count as hits
-        for xy, z in static_metal:
+        for xy, _z in static_metal:
             dd = np.linalg.norm(pos[:, :2] - xy, axis=1)
             j = int(np.argmin(dd))
             if pd[j] > 0 and dd[j] < self.inp.slots[j].radius + 0.2:
@@ -438,7 +478,7 @@ class AutonomyStack:
             att = (1.0 / (1.0 + 0.3 * r * r)) * (0.45 if occl else 1.0)
             refl = {i: MATERIALS[st.spec.material].acoustic_reflectivity for i, st in self.items.items.items()}
 
-            def expected(others, include=None):
+            def expected(others, include=None, base=base, refl=refl, att=att):
                 e = 0.15 * base + sum(0.6 * refl[j] * p for j, p in others.items())
                 if include is not None:
                     e += 0.6 * refl[include]
@@ -460,6 +500,10 @@ class AutonomyStack:
                 self.vis = VisibilityModel(self.inp.prior_map, self.inp.slots, self.cam_cfg, self.inp.room[2])
                 self.nbv.vis = self.vis
                 self.occ.set_prior_from_boxes([o.box for o in self.inp.prior_map])
+                # re-anchored slots are trusted again
+                for j, sl in enumerate(self.inp.slots):
+                    if sl.anchor == dg.object:
+                        self._suspect_slot_t.pop(j, None)
                 self.prov.add_evidence(f"diag:{len(self.diag.diagnoses)}", dg.t, "world_model",
                                        {"cause": "map_change", "object": dg.object, "p": dg.prob})
         elif dg.cause == "loc_drift":
@@ -525,7 +569,7 @@ class AutonomyStack:
         # path uncertainty ahead (for the supervisor)
         path = self.goal.path if self.goal is not None else np.array([pose[:2]])
         ahead = path[:6] if len(path) else np.array([pose[:2]])
-        self._path_entropy = float(np.mean(self._unc_at(ahead)))
+        self._path_entropy = float(np.mean(self._unc_at(ahead, excess=True)))
         # MPC
         hs = self.tracker.predict_samples(self.mpc.H, self.mpc.dt, 12, self.rng)
         speed_scale = 1.0
@@ -558,8 +602,8 @@ class AutonomyStack:
         v, w = self.sup.gate(v, w, retreat)
         return VelocityCommand(float(v), float(w), acoustic_probe_target=probe)
 
-    def _unc_at(self, xy):
-        u = self.occ.uncertainty_field()
+    def _unc_at(self, xy, excess: bool = False):
+        u = self.occ.excess_uncertainty_field() if excess else self.occ.uncertainty_field()
         c = self.occ.grid2d.world_to_cell(xy)
         return u[c[:, 0], c[:, 1]]
 
@@ -574,7 +618,9 @@ class AutonomyStack:
             dist, parent = dijkstra_field(cm.soft * 0.3, cm.lethal, s)
             if np.isfinite(dist[g]):
                 cells = extract_path(parent, g)
-                path = smooth_path(np.vstack([pose[None, :2], cm.grid.cell_to_world(np.array(cells))]), cm.lethal, cm.grid)
+                path = smooth_path(
+                    np.vstack([pose[None, :2], cm.grid.cell_to_world(np.array(cells))]), cm.lethal, cm.grid
+                )
         return ViewGoal(np.asarray(p, float), path, 0.0, tag, None, {})
 
     def _retreat_cmd(self, pose, tracks):
@@ -584,9 +630,16 @@ class AutonomyStack:
         near = min(pts, key=lambda q: np.linalg.norm(q - pose[:2]))
         away = np.arctan2(pose[1] - near[1], pose[0] - near[0])
         err = wrap_angle(away - pose[2])
-        back_ok = self.cm is None or self.cm.lookup((pose[:2] - 0.3 * np.array([np.cos(pose[2]), np.sin(pose[2])]))[None], "edt")[0] > self.radius + 0.05
+        heading = np.array([np.cos(pose[2]), np.sin(pose[2])])
+
+        def clear(xy) -> bool:
+            return self.cm is None or float(self.cm.lookup(xy[None], "edt")[0]) > self.radius + 0.05
+
+        back_ok = clear(pose[:2] - 0.3 * heading)
+        front_ok = clear(pose[:2] + 0.3 * heading)
         if abs(err) < np.pi / 2:
-            return (0.15, float(np.clip(1.2 * err, -0.6, 0.6)))
+            # move away from the person only if the way ahead is clear; otherwise turn in place
+            return (0.15 if front_ok else 0.0, float(np.clip(1.2 * err, -0.6, 0.6)))
         return (-0.12 if back_ok else 0.0, float(np.clip(1.2 * wrap_angle(err + np.pi), -0.6, 0.6)))
 
     # ------------------------------------------------------------------
@@ -598,8 +651,13 @@ class AutonomyStack:
             self.ekf.nis_hist.clear()
         self._operator_ack = True
         self.operator_request_open = False
-        self.prov.add_evidence(f"operator:{t:.1f}", t, "operator", {"action": "ack+relocalise" if pose_hint is not None else "ack"},
-                               attributed_to="operator")
+        self.prov.add_evidence(
+            f"operator:{t:.1f}",
+            t,
+            "operator",
+            {"action": "ack+relocalise" if pose_hint is not None else "ack"},
+            attributed_to="operator",
+        )
 
     def finalize(self, t: float) -> list:
         """Close all open claims at episode end (ABSTAIN for anything undecided)."""

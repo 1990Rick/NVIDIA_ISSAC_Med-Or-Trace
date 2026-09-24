@@ -8,7 +8,6 @@ profile layout.  Isaac Sim versions differ in accepted keys; run
 profiles against the installed version before large runs.
 """
 import json
-from pathlib import Path
 
 import _bootstrap  # noqa: F401
 import numpy as np

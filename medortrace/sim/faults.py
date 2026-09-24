@@ -121,13 +121,28 @@ def apply_truth_modifications(spec: SceneSpec, fm: FaultModel, rng: np.random.Ge
                                             OrientedBox((tbl.center[0] - 1.8, y, 0.03), (0.9, 0.03, 0.03), 0.15),
                                             "stainless_steel_brushed", "iv_pole", tags=["rare"]))
         elif g == "boom_lowered":
-            spec.objects.append(SceneObject("lowered_boom", "monitor",
-                                            OrientedBox((tbl.center[0] - 1.9, tbl.center[1] - 1.9, 1.35), (0.35, 0.2, 0.12)),
-                                            "monitor_glass", "monitor", tags=["rare"]))
+            spec.objects.append(
+                SceneObject(
+                    "lowered_boom",
+                    "monitor",
+                    OrientedBox((tbl.center[0] - 1.9, tbl.center[1] - 1.9, 1.35), (0.35, 0.2, 0.12)),
+                    "monitor_glass",
+                    "monitor",
+                    tags=["rare"],
+                )
+            )
         elif g == "drape_trailing":
-            spec.objects.append(SceneObject("trailing_drape", "drape",
-                                            OrientedBox((tbl.center[0] + 0.4, tbl.center[1] - 1.35, 0.01), (0.5, 0.3, 0.01)),
-                                            "surgical_drape", "drape", sterile=True, tags=["rare"]))
+            spec.objects.append(
+                SceneObject(
+                    "trailing_drape",
+                    "drape",
+                    OrientedBox((tbl.center[0] + 0.4, tbl.center[1] - 1.35, 0.01), (0.5, 0.3, 0.01)),
+                    "surgical_drape",
+                    "drape",
+                    sterile=True,
+                    tags=["rare"],
+                )
+            )
         elif g == "cart_tipped":
             c = spec.object("cart_2")
             c.box = OrientedBox(c.box.center * np.array([1, 1, 0]) + np.array([0, -0.4, 0.25]),

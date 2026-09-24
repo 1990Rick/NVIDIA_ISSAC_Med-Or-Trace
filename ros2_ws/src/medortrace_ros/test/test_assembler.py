@@ -293,3 +293,13 @@ def test_loopback_matches_in_process_episode_loop():
     tampered = copy.deepcopy(prov)
     tampered[3].json_attrs = tampered[3].json_attrs.replace("}", ', "x": 1}', 1)
     assert not verify_provenance_stream(tampered)
+    # a late joiner's transient-local history is a suffix: not a complete chain, but verifiable as one
+    k = len(prov) // 2
+    suffix = prov[k:]
+    assert not verify_provenance_stream(suffix)
+    assert verify_provenance_stream(suffix, allow_suffix=True)
+    assert verify_provenance_stream(suffix, anchor=(prov[k - 1].index, prov[k - 1].hash))
+    assert verify_provenance_stream(prov, anchor=(-1, "GENESIS"))
+    assert not verify_provenance_stream(suffix, anchor=(prov[k - 2].index, prov[k - 2].hash))
+    assert not verify_provenance_stream(suffix[:2] + suffix[3:], allow_suffix=True)          # gap
+    assert not verify_provenance_stream(tampered[2:], allow_suffix=True)                      # edited event 3

@@ -87,16 +87,22 @@ class MppiController:
         cost = np.zeros(K)
         # --- path tracking --------------------------------------------------
         if path is not None and len(path):
-            d = np.linalg.norm(xy[:, :, None, :] - path[None, None], axis=3)   # K,H,P
-            cost += self.w["track"] * d.min(axis=2).mean(axis=1)
+            # distances to the path *polyline* (smoothed paths keep only corner
+            # vertices, so vertex distances would penalise the straight runs)
+            dproj, rem = polyline_projection(xy, path)                          # K,H
+            cost += self.w["track"] * dproj.mean(axis=1)
             goal = path[-1]
-            dist_goal = np.linalg.norm(xy[:, -1] - goal, axis=1)
             start_goal = np.linalg.norm(x0[:2] - goal)
-            cost += self.w["progress"] * dist_goal
+            # progress = cost-to-go along the path from the end of the horizon
+            # (distance back to the path + remaining arc length).  Euclidean
+            # distance to the goal would pull the rollouts straight at it and
+            # fight the path wherever it detours (kick buckets, sterile
+            # keep-out) until the robot stalls.
+            cost += self.w["progress"] * (dproj[:, -1] + rem[:, -1])
             if goal_heading is not None and start_goal < 0.4:
                 cost += self.w["heading"] * np.abs(wrap_angle(X[:, -1, 2] - goal_heading))
             elif len(path) > 1:
-                look = path[min(2, len(path) - 1)]
+                look = lookahead_point(x0[:2], path, 0.8)
                 desired = np.arctan2(look[1] - x0[1], look[0] - x0[0])
                 cost += 0.3 * self.w["heading"] * np.abs(wrap_angle(X[:, :5, 2] - desired)).mean(axis=1)
         # --- static obstacles / keep-out ---------------------------------
@@ -175,3 +181,42 @@ class MppiController:
 
     def reset(self) -> None:
         self.U[:] = 0.0
+
+
+def polyline_projection(pts: np.ndarray, path: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest-point projection of ``pts`` (...,2) onto the polyline ``path`` (P,2).
+
+    Returns (distance to the polyline, remaining arc length from the projected
+    point to the end of the path), both shaped like ``pts[..., 0]``.
+    """
+    if len(path) == 1:
+        d = np.linalg.norm(pts - path[0], axis=-1)
+        return d, np.zeros_like(d)
+    a, ab = path[:-1], np.diff(path, axis=0)                                # S,2
+    L2 = (ab ** 2).sum(axis=1)
+    seg = np.sqrt(L2)
+    rem_after = np.cumsum(seg[::-1])[::-1] - seg                           # arc length after segment i
+    ap = pts[..., None, :] - a                                              # ...,S,2
+    tt = np.clip((ap * ab).sum(axis=-1) / np.maximum(L2, 1e-12), 0.0, 1.0)  # ...,S
+    dist = np.linalg.norm(ap - tt[..., None] * ab, axis=-1)                 # ...,S
+    k = dist.argmin(axis=-1)
+    dmin = np.take_along_axis(dist, k[..., None], -1)[..., 0]
+    tk = np.take_along_axis(tt, k[..., None], -1)[..., 0]
+    return dmin, rem_after[k] + (1.0 - tk) * seg[k]
+
+
+def lookahead_point(x: np.ndarray, path: np.ndarray, dist: float) -> np.ndarray:
+    """Point ``dist`` metres further along ``path`` than the projection of ``x``."""
+    if len(path) == 1:
+        return path[0]
+    _, rem0 = polyline_projection(x[None], path)
+    target = max(float(rem0[0]) - dist, 0.0)
+    seg = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    rem_v = np.r_[np.cumsum(seg[::-1])[::-1], 0.0]                          # remaining arc at each vertex
+    i = int(np.searchsorted(-rem_v, -target, side="left"))                  # first vertex with rem <= target
+    if i == 0:
+        return path[0]
+    if i >= len(path):
+        return path[-1]
+    f = (rem_v[i - 1] - target) / max(rem_v[i - 1] - rem_v[i], 1e-12)
+    return path[i - 1] + f * (path[i] - path[i - 1])

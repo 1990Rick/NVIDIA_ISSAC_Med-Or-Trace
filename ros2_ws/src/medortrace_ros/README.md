@@ -117,11 +117,16 @@ python -m pytest ros2_ws/src/medortrace_ros/test -q
 * `test_assembler.py` covers the delivery semantics per channel, staleness, timing, resets and
   bookkeeping. It also has a loopback test that replays a 3 s lite episode message by message through the
   assembler into `AutonomyRuntime`, after a mission JSON round trip, and requires the commands to match
-  the in-process episode loop exactly. The streamed provenance events must re-verify as a hash chain.
+  the in-process episode loop exactly. The streamed provenance events must re-verify as a hash chain,
+  and a suffix of them (a late joiner's history) must verify with an anchor or `allow_suffix=True`.
 * `test_ros_free_modules.py` checks:
   * interface files: rosidl naming rules, CMake registration, coverage of the dataclasses, constants;
-  * the topic registry against `medortrace.isaac.ros2_bridge.TOPICS`, and the QoS classes;
-  * a lossless lidar layout, and scan-pattern refill for driver clouds;
+  * the topic registry against `medortrace.isaac.ros2_bridge.TOPICS`, the QoS classes, and a provenance
+    history that holds a complete default case;
+  * a lossless lidar layout, and re-binning of driver / RTX clouds onto the stack's 16 x 180 ray grid
+    (identical to `IsaacBackend`'s in-process binning);
+  * TF ownership with the Isaac OmniGraph (the bridge keeps `odom -> base_link`), and the bridge's
+    wheel-odometry dead reckoning;
   * conversions on duck-typed messages;
   * mission JSON (strict and lossless);
   * the verify / explain / operator-ack services and the audit export;

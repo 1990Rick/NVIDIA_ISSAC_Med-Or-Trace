@@ -27,7 +27,10 @@ class Costmap:
         core = col > occ_thresh
         # room boundary
         core[0, :] = core[-1, :] = core[:, 0] = core[:, -1] = True
-        self.edt = distance_transform_edt(~core) * self.grid.res
+        # distance to the *boundary* of the nearest occupied cell (centre-to-centre
+        # distance minus half a cell): the obstacle surface can lie anywhere inside
+        # that cell, so the centre distance would overstate clearance by up to res/2
+        self.edt = np.maximum(distance_transform_edt(~core) * self.grid.res - 0.5 * self.grid.res, 0.0)
         pts = self.grid.centers().reshape(-1, 2)
         keep = np.zeros(len(pts), dtype=bool)
         self.zone_dist = np.full(len(pts), np.inf)
@@ -44,12 +47,25 @@ class Costmap:
         self.robot_radius = robot_radius
 
     def lookup(self, xy: np.ndarray, layer: str = "edt") -> np.ndarray:
+        """Layer value at world points; ``edt`` is bilinearly interpolated between
+        cell centres (a nearest-cell lookup would be off by up to res/sqrt(2) at
+        the query point - enough to let the controller graze obstacles)."""
         arr = getattr(self, layer)
-        c = self.grid.world_to_cell(xy.reshape(-1, 2))
-        out = arr[c[:, 0], c[:, 1]]
-        inb = self.grid.in_bounds(xy.reshape(-1, 2))
+        pts = xy.reshape(-1, 2)
+        inb = self.grid.in_bounds(pts)
         if layer == "edt":
-            out = np.where(inb, out, 0.0)
-        elif layer in ("lethal", "keepout"):
+            u = (pts - self.grid.origin) / self.grid.res - 0.5
+            i0 = np.floor(u).astype(int)
+            f = u - i0
+            nx, ny = arr.shape
+            i0x, i0y = np.clip(i0[:, 0], 0, nx - 1), np.clip(i0[:, 1], 0, ny - 1)
+            i1x, i1y = np.clip(i0[:, 0] + 1, 0, nx - 1), np.clip(i0[:, 1] + 1, 0, ny - 1)
+            fx, fy = np.clip(f[:, 0], 0, 1), np.clip(f[:, 1], 0, 1)
+            out = ((1 - fx) * (1 - fy) * arr[i0x, i0y] + fx * (1 - fy) * arr[i1x, i0y]
+                   + (1 - fx) * fy * arr[i0x, i1y] + fx * fy * arr[i1x, i1y])
+            return np.where(inb, out, 0.0).reshape(xy.shape[:-1])
+        c = self.grid.world_to_cell(pts)
+        out = arr[c[:, 0], c[:, 1]]
+        if layer in ("lethal", "keepout"):
             out = np.where(inb, out, True)
         return out.reshape(xy.shape[:-1])

@@ -19,9 +19,18 @@ Pipeline per control tick (10 Hz by default):
    :class:`SensorBundle` identical in type to the lite backend's.
 
 The *same* ``Episode`` (scene spec, workflow, faults, prior map) drives both
-backends; the USD stage is authored from it on reset.  RNG parity: the battery
-start charge, workflow-log latencies and item offsets consume the same streams
-/ forks as ``LiteBackend``.
+backends; the USD stage is authored from it on reset.  Timing faults
+(dropouts, skew, odometry bias) are applied to the readings in step 5; the
+reflective faults (``specular_gain``, ``floor_wet``) are material edits of the
+opened stage (:func:`medortrace.isaac.sensors.apply_reflective_faults`,
+recorded in ``reflective_faults``).  RNG parity: the battery start charge,
+workflow-log latencies and item offsets consume the same streams / forks as
+``LiteBackend``.
+
+The radar is auxiliary: if it cannot be created on the running release the
+episode continues without it (``radar = None``) and the reason is recorded in
+``sensor_warnings`` together with the adapters' own warnings (e.g. a custom
+RTX profile that the release did not apply).
 
 Backend options (``staff_mode``, ``detector``, ``drive``, ...) are not part of
 the scenario config, so a registry entry keeps its ``cfg_hash`` on either
@@ -107,9 +116,17 @@ class IsaacBackend(SimBackend):
 
         from medortrace.isaac.compat import open_stage, usd_stage
         from medortrace.isaac.robot import RobotController, find_articulation_root
-        from medortrace.isaac.sensors import (AcousticAdapter, CameraAdapter, ContactAdapter, ImuAdapter,
-                                              LandmarkAdapter, RtxLidarAdapter, RtxRadarAdapter,
-                                              normalize_nonvisual_tokens)
+        from medortrace.isaac.sensors import (
+            AcousticAdapter,
+            CameraAdapter,
+            ContactAdapter,
+            ImuAdapter,
+            LandmarkAdapter,
+            RtxLidarAdapter,
+            RtxRadarAdapter,
+            apply_reflective_faults,
+            normalize_nonvisual_tokens,
+        )
         from medortrace.isaac.staff import StaffDriver
         from medortrace.sim.lite_backend import RobotParams
 
@@ -133,6 +150,9 @@ class IsaacBackend(SimBackend):
                 a = stage.GetPrimAtPath(p).GetAttribute("physics:kinematicEnabled")
                 if a and a.IsValid():
                     a.Set(True)
+        # the episode's reflective faults (lite: simulate_lidar specular_gain / floor_wet) as material edits
+        self.reflective_faults = apply_reflective_faults(stage, ep.materials, ep.faults.specular_gain,
+                                                         ep.faults.floor_wet)
         self.nonvisual_fixes = normalize_nonvisual_tokens(stage) if self.opts["normalize_nonvisual"] else []
         self.base_path = find_articulation_root(stage, ROBOT_PRIM)
         World = world_cls()
@@ -165,8 +185,16 @@ class IsaacBackend(SimBackend):
         self.lidar = RtxLidarAdapter(f"{base}/lidar_link", mount_height=float(lc.get("mount_height", 0.9)),
                                      az_res_deg=float(lc.get("az_res_deg", 2.0)),
                                      max_range=float(lc.get("max_range", 20.0)))
+        self.sensor_warnings = list(self.lidar.warnings)
         rx = frames.get("radar_link", {}).get("xyz", [0.25, 0.0, 0.6])
-        self.radar = RtxRadarAdapter(f"{base}/radar_link", mount_offset=(float(rx[0]), float(rx[1]), 0.0))
+        try:
+            self.radar = RtxRadarAdapter(f"{base}/radar_link", mount_offset=(float(rx[0]), float(rx[1]), 0.0))
+            self.sensor_warnings += self.radar.warnings
+        except Exception as e:  # radar is an auxiliary modality: run without it rather than abort the episode
+            self.radar = None
+            msg = f"RTX radar unavailable, episode runs without radar: {type(e).__name__}: {e}"
+            print(f"[medortrace] WARNING: {msg}")
+            self.sensor_warnings.append(msg)
         items_info = {i.id: {"cls": i.cls, "size": tuple(i.size), "glare": float(ep.materials[i.material].glare),
                              "tag_readable": bool(i.tag_readable), "prim": p}
                       for i, p in zip(spec.items, self.item_paths)}
@@ -268,7 +296,7 @@ class IsaacBackend(SimBackend):
             b.lidar = self.lidar.read(t, stamp)
         if self._due("camera") and not fm.dropped("camera", t):
             b.camera = self.camera.read(t, stamp)
-        if self._due("radar") and not fm.dropped("radar", t):
+        if self.radar is not None and self._due("radar") and not fm.dropped("radar", t):
             b.radar = self.radar.read(t, stamp)
         if self._acoustic_target and self._due("acoustic") and not fm.dropped("acoustic", t):
             slots = [s for s in ep.spec.slots if s.acoustic_region == self._acoustic_target]

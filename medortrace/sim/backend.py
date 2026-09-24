@@ -51,5 +51,5 @@ class SimBackend(abc.ABC):
     @abc.abstractmethod
     def dt(self) -> float: ...
 
-    def close(self) -> None:  # pragma: no cover - optional
-        pass
+    def close(self) -> None:  # noqa: B027 - optional hook, deliberately a no-op  # pragma: no cover
+        return None

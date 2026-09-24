@@ -13,6 +13,7 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.4"]
+usd = ["usd-core>=24.0"]
 train = ["torch>=2.1", "torchvision>=0.16", "pillow"]
 
 [tool.setuptools.packages.find]
@@ -29,4 +30,4 @@ extend-exclude = ["ros2_ws/build", "ros2_ws/install"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B"]
-ignore = ["E731", "B008", "B905"]
+ignore = ["E731", "B008", "B905", "E741"]  # E741: O/I are ray origins / identity in the maths code

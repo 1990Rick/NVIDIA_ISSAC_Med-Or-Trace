@@ -96,7 +96,9 @@ class LiteBackend(SimBackend):
         self.pose = np.array([spec.robot_start[0], spec.robot_start[1], spec.robot_start[2]])
         self.vel = np.zeros(2)
         self.prev_vel = np.zeros(2)
-        self.battery = self.rp.battery_wh * float(ep.streams["robot"].uniform(*cfg.get("robot", {}).get("battery_start_frac", [0.55, 0.95])))
+        self.battery = self.rp.battery_wh * float(
+            ep.streams["robot"].uniform(*cfg.get("robot", {}).get("battery_start_frac", [0.55, 0.95]))
+        )
         self.energy_used = 0.0
         self.actual = StaffPopulation(spec, ep.workflow.staff_tasks, ep.streams, robot_aware=True,
                                       params=cfg.get("agents"))
@@ -226,7 +228,11 @@ class LiteBackend(SimBackend):
         scene = self._ray_scene()
         x, y, th = self.pose
         haze = float(ep.spec.nuisance.get("haze", 0.0))
-        mats_all = self.obj_materials + [MATERIALS["human"]] * len(scene.cyl_xy) + [ep.materials["floor_vinyl"], ep.materials["painted_wall"]]
+        mats_all = (
+            self.obj_materials
+            + [MATERIALS["human"]] * len(scene.cyl_xy)
+            + [ep.materials["floor_vinyl"], ep.materials["painted_wall"]]
+        )
         tags_all = self.obj_tags + [[] for _ in range(len(scene.cyl_xy))]
         # --- lidar ----------------------------------------------------------
         if self._due("lidar") and not fm.dropped("lidar", t):
@@ -314,8 +320,13 @@ class LiteBackend(SimBackend):
             for k in range(10):
                 h = self._hdr("imu", "imu_link")
                 h.stamp -= (9 - k) * self._dt / 10
-                b.imu.append(ImuSample(h, np.array([acc, self.vel[0] * self.vel[1], 9.81]) + self.rng.normal(0, 0.05, 3),
-                                       np.array([0.0, 0.0, self.vel[1]]) + self.rng.normal(0, 0.003, 3)))
+                b.imu.append(
+                    ImuSample(
+                        h,
+                        np.array([acc, self.vel[0] * self.vel[1], 9.81]) + self.rng.normal(0, 0.05, 3),
+                        np.array([0.0, 0.0, self.vel[1]]) + self.rng.normal(0, 0.003, 3),
+                    )
+                )
         b.contact = ContactState(self._hdr("contact", "bumper"), self.contact_force > 0, self.contact_force)
         # --- workflow log (delivered with latency) --------------------------------
         while self._wf_ptr < len(self._pending_wf) and \

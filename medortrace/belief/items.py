@@ -123,8 +123,11 @@ class ItemBelief:
                     continue
                 if s.kind == "hand":
                     rate = self.hand_leak
-                    targets = [j for j in range(self.n) if j != i and self.slots[j].kind in ("surface", "container", "hand")
-                               and self.dist[i, j] < 1.5]
+                    targets = [
+                        j
+                        for j in range(self.n)
+                        if j != i and self.slots[j].kind in ("surface", "container", "hand") and self.dist[i, j] < 1.5
+                    ]
                 else:
                     rate = self.leak
                     targets = [j for j in self.floor_idx + self.hand_idx if j != i and self.dist[i, j] < 2.5]
@@ -184,19 +187,28 @@ class ItemBelief:
                 continue
             c = ci[cls]
             n = class_counts.get(cls, np.zeros(self.n))
-            # confusion-induced soft counts from items of *other* classes + clutter false positives
-            lam_conf = self.fp + sum(self.confusion[ci[o], c] * exp_det[o] for o in by_class if o != cls)
-            total = np.sum([self.items[j].b for j in iids], axis=0)
-            for iid in iids:
-                st = self.items[iid]
-                g = (glare_expect or {}).get(iid, 0.0)
-                pd = vp * (1 - 0.45 * g) * self.q_vis * self.confusion[c, c]
-                m_other = np.maximum(total - st.b, 0.0)
-                lam_w = pd * (1 + m_other) + lam_conf
-                lam_wo = pd * m_other + lam_conf
-                llr = np.where(vis, n * np.log(lam_w / lam_wo) - (lam_w - lam_wo), 0.0)
+            # false positives: clutter + confusion-induced soft detections from
+            # items of *other* classes (Poisson)
+            lam_fp = self.fp + sum(self.confusion[ci[o], c] * exp_det[o] for o in by_class if o != cls)
+            # per-item probability of being detected *given* presence at a slot
+            pd = np.array([vp * (1 - 0.45 * (glare_expect or {}).get(j, 0.0)) * self.q_vis * self.confusion[c, c]
+                           for j in iids])                                        # (m, S)
+            B = np.array([self.items[j].b for j in iids])                        # (m, S)
+            # exact count likelihood under the mean-field factorisation: every
+            # other same-class item k is independently present-and-detected with
+            # probability b_k * pd_k (Poisson-binomial), plus Poisson false
+            # positives.  Unlike a Poisson approximation of the item term this
+            # makes "one sponge seen where the log claims two" informative - the
+            # retained-sponge case of CF-A.
+            for m_i, iid in enumerate(iids):
+                q_other = np.delete(B * pd, m_i, axis=0).T                        # (S, m-1)
+                P_wo = _poisson_binomial(q_other)                                 # (S, m)
+                P_w = _poisson_binomial(np.c_[q_other, pd[m_i]])                  # (S, m+1)
+                lik_w = _count_likelihood(P_w, lam_fp, n)
+                lik_wo = _count_likelihood(P_wo, lam_fp, n)
+                llr = np.where(vis, np.log(lik_w + 1e-300) - np.log(lik_wo + 1e-300), 0.0)
                 llr = np.clip(llr, -6.0, 6.0)
-                self._apply(st, llr, evidence_id, t, "camera", vis)
+                self._apply(self.items[iid], llr, evidence_id, t, "camera", vis)
         for iid, k in tag_reads:
             st = self.items.get(iid)
             if st is None:
@@ -288,3 +300,34 @@ class ItemBelief:
 
 def poisson_logpmf(n, lam):
     return n * np.log(lam) - lam - gammaln(n + 1)
+
+
+def _poisson_binomial(q: np.ndarray) -> np.ndarray:
+    """(S, m) independent success probabilities -> (S, m+1) pmf of the number of successes."""
+    S, m = q.shape
+    P = np.zeros((S, m + 1))
+    P[:, 0] = 1.0
+    for k in range(m):
+        qk = q[:, k:k + 1]
+        P[:, 1:] = P[:, 1:] * (1 - qk) + P[:, :-1] * qk
+        P[:, 0] *= 1 - q[:, k]
+    return P
+
+
+def _count_likelihood(P_det: np.ndarray, lam: np.ndarray, n: np.ndarray) -> np.ndarray:
+    """P(n observed detections) = sum_d P_det(d) * Poisson(n - d; lam), per slot.
+
+    ``n`` is a soft count (sum of calibrated class probabilities); a fractional
+    count is treated as the two-point mixture of its floor and ceiling."""
+    lam = np.maximum(np.broadcast_to(lam, n.shape), 1e-9)
+    d = np.arange(P_det.shape[1])[None]
+
+    def lik(nn):
+        k = nn[:, None] - d
+        logp = np.where(k >= 0, k * np.log(lam[:, None]) - lam[:, None] - gammaln(np.maximum(k, 0) + 1), -np.inf)
+        return (P_det * np.exp(logp)).sum(axis=1)
+
+    lo = np.floor(n)
+    f = n - lo
+    return (1 - f) * lik(lo) + f * lik(lo + 1)
+

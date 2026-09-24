@@ -10,7 +10,8 @@
 Per render unit (a counterfactual *pair* or a single scenario):
 
 1. ``build_episode`` + ``build_stage`` for every arm (no robot in the dataset scene; rigid bodies
-   frozen, frames are posed rather than simulated);
+   frozen, frames are posed rather than simulated); the scenario's reflective faults (``specular_gain``,
+   ``floor_wet``) are applied as material edits, as in ``IsaacBackend``, before the causal lock is taken;
 2. one shared schedule (frame times, robot-like camera viewpoints valid in every arm, nuisance
    seed) from ``medortrace.isaac.synthetic``;
 3. per arm and frame: move items/staff to the ground-truth state at the frame time inside
@@ -36,16 +37,27 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 import _bootstrap  # noqa: F401
+import numpy as np
 from _common import DEFAULT_REGISTRY
 
 from medortrace.common.config import CONFIG_DIR, load_yaml
 from medortrace.eval.registry import load_registry, select
-from medortrace.isaac.synthetic import (CAMERA_PATH, apply_causal_state, author_camera, build_index,
-                                        camera_intrinsics, causal_states, frame_labels, frame_times,
-                                        freeze_physics, make_units, sample_viewpoints, set_camera_pose, unit_seed)
+from medortrace.isaac.synthetic import (
+    CAMERA_PATH,
+    apply_causal_state,
+    author_camera,
+    build_index,
+    camera_intrinsics,
+    causal_states,
+    frame_labels,
+    frame_times,
+    freeze_physics,
+    make_units,
+    sample_viewpoints,
+    set_camera_pose,
+    unit_seed,
+)
 from medortrace.sim.episode import build_episode
 
 # pxr-dependent modules (medortrace.usd, replicator_randomizers) are imported after SimulationApp starts:
@@ -163,6 +175,7 @@ def render_unit(unit, a, out: Path, cam_cfg: dict, intr: dict, capture) -> list[
     from pxr import Usd
 
     from medortrace.isaac.replicator_randomizers import CausalLabelWriter, CausalLock, NuisanceRandomizer
+    from medortrace.isaac.sensors import apply_reflective_faults
     from medortrace.usd.scene_builder import build_stage
     eps = [build_episode(e.resolve(), e.seed) for e in unit.entries]
     seed = unit_seed(a.seed, unit.key)
@@ -179,6 +192,8 @@ def render_unit(unit, a, out: Path, cam_cfg: dict, intr: dict, capture) -> list[
         stage = capture.open(usd) if capture else Usd.Stage.Open(str(usd))
         author_camera(stage, intr, CAMERA_PATH)
         freeze_physics(stage)           # posed frames: no dynamics may move locked prims between frames
+        # scenario condition (same in both arms of a pair), applied before the lock takes its reference
+        reflective = apply_reflective_faults(stage, ep.materials, ep.faults.specular_gain, ep.faults.floor_wet)
         lock = CausalLock(stage)
         rnd = NuisanceRandomizer(stage, seed=seed, lock=lock, strength=a.strength)
         if capture:
@@ -203,7 +218,8 @@ def render_unit(unit, a, out: Path, cam_cfg: dict, intr: dict, capture) -> list[
                             "causal_signature": info["causal_signature"],
                             "nuisance_signature": info["nuisance_signature"],
                             "files": {kk: f"{e.scenario_id}/{v}" for kk, v in res["files"].items()}})
-        print(f"[medortrace] {e.scenario_id}: {len(st_list)} frames ({'dry-run' if not capture else 'rendered'})")
+        print(f"[medortrace] {e.scenario_id}: {len(st_list)} frames ({'dry-run' if not capture else 'rendered'})"
+              + (f", {len(reflective)} reflective-fault material edits" if reflective else ""))
     return records
 
 

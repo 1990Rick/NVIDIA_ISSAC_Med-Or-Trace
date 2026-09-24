@@ -3,7 +3,9 @@
 * interface definitions: syntax / naming rules of rosidl, CMake registration, and field coverage of
   the medortrace dataclasses they mirror;
 * topic registry & QoS: names match medortrace.isaac.ros2_bridge.TOPICS, QoS policy per class;
-* convert: lossless lidar layout, scan-pattern refill, attribute-level conversions on fake messages;
+* convert: lossless lidar layout, re-binning of driver / RTX clouds onto the stack's ray grid,
+  attribute-level conversions on fake messages;
+* sim bridge: TF ownership with the Isaac OmniGraph, wheel-odometry dead reckoning;
 * mission JSON, workflow-gateway parsing, operator policy, and the runtime's verification services.
 """
 
@@ -155,6 +157,17 @@ def test_qos_policy_per_topic_class():
     assert resolve("cmd_vel", cfg)["durability"] == "volatile"
 
 
+def test_provenance_history_holds_a_complete_default_case():
+    """A late joiner must get the whole chain (from GENESIS) of a default-length case, even at the peak rate."""
+    from medortrace_ros.qos import load_qos_config, resolve
+
+    from medortrace.common.config import load_config
+
+    q = resolve("provenance", load_qos_config())
+    duration = float(load_config("scenarios/nominal.yaml")["episode"]["duration_s"])
+    assert q["history"] == "keep_all" or q["depth"] >= 40.0 * duration        # topics.py: ~10-40 events/s
+
+
 def test_params_yaml_names_existing_nodes():
     import yaml
 
@@ -205,24 +218,127 @@ def test_lidar_columns_round_trip_is_lossless(lite_scan):
     np.testing.assert_array_equal(back.gt_is_ghost, scan.gt_is_ghost)
 
 
-def test_driver_cloud_without_no_returns_is_refilled_from_scan_pattern(lite_scan):
+@pytest.fixture(scope="module")
+def driver_scan():
+    """The lite fixture scene seen by the OR16 at its native resolution (16 rings x 0.2 deg), like a driver."""
+    from medortrace.sim.raycast import RayScene
+    from medortrace.sim.sensors_lite import LidarConfig, simulate_lidar
+    from medortrace.world.materials import MATERIALS
+
+    scene = RayScene(np.array([[3.0, 0.0, 0.5], [0.0, 25.0, 0.5]]), np.array([[0.3, 2.0, 0.5], [2.0, 0.3, 0.5]]),
+                     np.zeros(2), np.zeros((0, 2)), np.zeros(0), np.zeros(0), 3.0)
+    cfg = LidarConfig(rings=16, az_res_deg=0.2, max_range=30.0)
+    mats = [MATERIALS["painted_wall"], MATERIALS["painted_wall"], MATERIALS["floor_vinyl"], MATERIALS["painted_wall"]]
+    ranges, d_s, ring, inten, ghost, obj = simulate_lidar(scene, mats, [[], []], np.array([1.0, 0.0, 0.9]), 0.0, cfg,
+                                                          np.random.default_rng(1))
+    fin = np.isfinite(ranges)
+    return {"xyz": (d_s[fin] * ranges[fin, None]).astype(np.float32), "intensity": inten[fin].astype(np.float32),
+            "n_rays": len(ranges)}
+
+
+def test_driver_cloud_is_regridded_onto_the_stack_ray_grid(driver_scan):
+    from medortrace_ros.convert import lidar_from_columns, pattern_elevations, pattern_ray_count, resolve_lidar_pattern
+
+    from medortrace.common.config import CONFIG_DIR
+    from medortrace.common.msgs import Header
+    from medortrace.isaac.sensors import grid_scan, lidar_elevations
+
+    or16 = lidar_elevations(CONFIG_DIR / "sensors" / "rtx_lidar_or16.json")
+    xyz = driver_scan["xyz"]
+    assert driver_scan["n_rays"] == 16 * 1800 and len(xyz) > 2000
+    src_id = np.arange(len(xyz), dtype=np.int32)
+    cols = {"x": xyz[:, 0], "y": xyz[:, 1], "z": xyz[:, 2], "intensity": driver_scan["intensity"],
+            "gt_object": src_id}                                                    # x, y, z only: a driver cloud
+    # launch files: OR16 rings, az_res / max_range <= 0 -> the stack's sensors.lidar values (scenarios/default.yaml)
+    pattern = resolve_lidar_pattern({"rings": 16, "elev_min_deg": -15.0, "elev_max_deg": 15.0, "az_res_deg": 0.0},
+                                    {"az_res_deg": 2.0, "max_range": 20.0})
+    assert pattern["az_res_deg"] == 2.0 and pattern["max_range"] == 20.0 and pattern_ray_count(pattern) == 2880
+    np.testing.assert_allclose(pattern_elevations(pattern), or16)
+    back = lidar_from_columns(cols, Header(1.0, 1.0, "lidar_link"), 0.9, pattern)
+    assert len(back.ranges) == len(back.directions) == 2880                     # not 28,800: the stack's grid
+    fin = np.isfinite(back.ranges)
+    assert 0 < fin.sum() < 2880 and back.ranges[fin].max() <= 20.0
+    assert len(back.points) == len(back.intensity) == len(back.ring) == fin.sum()
+    np.testing.assert_allclose(np.linalg.norm(back.directions, axis=1), 1.0, atol=1e-6)
+    # identical to IsaacBackend's in-process binning of the RTX cloud (RtxLidarAdapter.read -> grid_scan)
+    ref = grid_scan(xyz.astype(float), driver_scan["intensity"].astype(float), or16, 2.0, 20.0)
+    np.testing.assert_array_equal(back.ranges, ref[4])
+    np.testing.assert_allclose(back.directions, ref[3], atol=1e-12)
+    np.testing.assert_array_equal(back.ring, ref[2])
+    # nearest return per (ring, 2 deg azimuth) cell; per-point fields follow the point each ray kept
+    p = xyz.astype(float)
+    d = np.linalg.norm(p, axis=1)
+    ring = np.argmin(np.abs(np.degrees(np.arcsin(p[:, 2] / d))[:, None] - pattern_elevations(pattern)), axis=1)
+    cell = ring * 180 + (np.floor((np.degrees(np.arctan2(p[:, 1], p[:, 0])) % 360.0) / 2.0).astype(int) % 180)
+    nearest = np.full(2880, np.inf)
+    np.minimum.at(nearest, cell[d <= 20.0], d[d <= 20.0])
+    np.testing.assert_allclose(back.ranges, nearest, rtol=1e-12)
+    kept = back.gt_object_id[fin]
+    assert (kept >= 0).all() and (back.gt_object_id[~fin] == -1).all()
+    np.testing.assert_allclose(p[kept], back.points, atol=1e-9)
+
+
+def test_lossless_layout_is_not_regridded_and_no_pattern_keeps_points(lite_scan):
     from medortrace_ros.convert import lidar_from_columns, lidar_to_columns
 
-    scan, cfg = lite_scan
+    scan, _ = lite_scan
+    pattern = {"rings": 16, "elev_min_deg": -15.0, "elev_max_deg": 15.0, "az_res_deg": 2.0, "max_range": 20.0}
+    back = lidar_from_columns(lidar_to_columns(scan), scan.header, 0.9, pattern)    # sim_bridge: already per ray
+    np.testing.assert_array_equal(back.ranges, scan.ranges.astype(np.float32).astype(float))
     full = lidar_to_columns(scan, include_gt=False)
     fin = np.isfinite(scan.ranges)
-    xyz_only = {k: full[k][fin] for k in ("x", "y", "z", "intensity")}          # what a real driver sends
-    pattern = {"rings": cfg.rings, "elev_min_deg": cfg.elev_min_deg, "elev_max_deg": cfg.elev_max_deg,
-               "az_res_deg": cfg.az_res_deg}
-    back = lidar_from_columns(xyz_only, scan.header, 0.9, pattern)
-    assert len(back.ranges) == len(scan.ranges)
-    assert np.isinf(back.ranges).sum() == np.isinf(scan.ranges).sum()
-    miss_ref = scan.directions[~fin]
-    miss = back.directions[np.isinf(back.ranges)]
-    d = np.abs(miss_ref[:, None, :] - miss[None, :, :]).sum(-1).min(axis=1)
-    assert d.max() < 1e-6
-    no_fill = lidar_from_columns(xyz_only, scan.header, 0.9)
-    assert np.isfinite(no_fill.ranges).all() and len(no_fill.ranges) == fin.sum()
+    no_grid = lidar_from_columns({k: full[k][fin] for k in ("x", "y", "z", "intensity")}, scan.header, 0.9)
+    assert np.isfinite(no_grid.ranges).all() and len(no_grid.ranges) == fin.sum()
+
+
+def test_resolve_lidar_pattern():
+    from medortrace_ros.convert import resolve_lidar_pattern
+
+    assert resolve_lidar_pattern(None, {"az_res_deg": 2.0}) is None
+    explicit = {"rings": 16, "az_res_deg": 1.0, "max_range": 12.0}
+    assert resolve_lidar_pattern(explicit, {"az_res_deg": 2.0, "max_range": 20.0}) == explicit
+    assert resolve_lidar_pattern({"rings": 16}, {}) == {"rings": 16, "az_res_deg": 2.0, "max_range": 20.0}
+
+
+# =====================================================================================================================
+# sim bridge (ROS-free parts)
+# =====================================================================================================================
+def test_isaac_graph_leaves_odom_and_base_tf_to_the_bridge():
+    """With the OmniGraph the TF tree must stay map -> odom -> base_link -> *_link (one parent per frame)."""
+    from medortrace_ros.sim_bridge_node import ALL_GROUPS, GRAPH_NODES_OWNED_BY_BRIDGE, ISAAC_GRAPH_GROUPS
+
+    from medortrace.isaac.ros2_bridge import graph_spec
+
+    assert set(ISAAC_GRAPH_GROUPS) <= set(ALL_GROUPS) and not {"tf", "odom"} & set(ISAAC_GRAPH_GROUPS)
+    ns = {"bridge": "B", "core": "C", "wheeled": "W"}
+    for drive in (False, True):                                      # isaac_graph mode / create() factory
+        nodes, conns, values = graph_spec(ns, base_link="/World/Robot/base_link", lidar_render_product="/rp/l",
+                                          camera_render_product="/rp/c", drive_from_cmd_vel=drive)
+        types = dict(nodes)
+        assert set(GRAPH_NODES_OWNED_BY_BRIDGE) <= set(types)
+        vals = dict(values)
+        tf_nodes = [n for n, t in types.items() if t == "B.ROS2PublishTransformTree"]
+        world_parented = {n for n in tf_nodes if not vals.get(f"{n}.inputs:parentPrim")}
+        odom_nodes = {n for n, t in types.items() if t in ("C.IsaacComputeOdometry", "B.ROS2PublishOdometry")}
+        assert world_parented | odom_nodes == set(GRAPH_NODES_OWNED_BY_BRIDGE)
+        kept = set(types) - set(GRAPH_NODES_OWNED_BY_BRIDGE)
+        # what stays publishes the sensor frames under base_link, and no kept node is fed by a deleted one
+        assert any(vals.get(f"{n}.inputs:parentPrim") == ["/World/Robot/base_link"] for n in kept if n in tf_nodes)
+        assert all(dst.split(".")[0] not in kept for src, dst in conns if src.split(".")[0] not in kept)
+
+
+def test_integrate_odom_dead_reckoning():
+    from medortrace_ros.sim_bridge_node import integrate_odom
+
+    pose = np.zeros(3)
+    for _ in range(10):
+        pose = integrate_odom(pose, 0.5, 0.0, 0.1)
+    np.testing.assert_allclose(pose, [0.5, 0.0, 0.0], atol=1e-12)
+    arc = np.zeros(3)
+    for _ in range(100):                                             # quarter circle of radius 1
+        arc = integrate_odom(arc, np.pi / 2 / 10.0, np.pi / 2 / 10.0, 0.1)
+    np.testing.assert_allclose(arc, [1.0, 1.0, np.pi / 2], atol=1e-4)
+    assert integrate_odom(np.array([0.0, 0.0, 3.1]), 0.0, 1.0, 0.1)[2] < 0          # heading wraps to (-pi, pi]
 
 
 def _stamp(t):

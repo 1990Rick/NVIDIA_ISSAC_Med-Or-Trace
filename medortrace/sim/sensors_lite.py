@@ -303,8 +303,16 @@ def simulate_acoustic(scene: RayScene, origin: np.ndarray, region: str, region_p
 
 
 # ---------------------------------------------------------------------------
-def simulate_landmarks(scene: RayScene, origin: np.ndarray, yaw: float, landmarks: list, rng: np.random.Generator,
-                       max_range: float = 8.0, r_sigma: float = 0.03, b_sigma: float = 0.01) -> list[LandmarkObservation]:
+def simulate_landmarks(
+    scene: RayScene,
+    origin: np.ndarray,
+    yaw: float,
+    landmarks: list,
+    rng: np.random.Generator,
+    max_range: float = 8.0,
+    r_sigma: float = 0.03,
+    b_sigma: float = 0.01,
+) -> list[LandmarkObservation]:
     obs = []
     cand = []
     for lm in landmarks:

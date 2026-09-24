@@ -131,8 +131,13 @@ def add_box(stage, path, box, mat, semantic, rigid=False, mass=0.0, kinematic=Fa
     return prim
 
 
-def build_stage(spec: SceneSpec, materials: dict[str, Material], out_path: str | Path,
-                robot_rig: str | None = "../robot/medortrace_rig.usda", item_positions: dict | None = None) -> Usd.Stage:
+def build_stage(
+    spec: SceneSpec,
+    materials: dict[str, Material],
+    out_path: str | Path,
+    robot_rig: str | None = "../robot/medortrace_rig.usda",
+    item_positions: dict | None = None,
+) -> Usd.Stage:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     stage = Usd.Stage.CreateNew(str(out_path))
@@ -245,7 +250,12 @@ def build_stage(spec: SceneSpec, materials: dict[str, Material], out_path: str |
         p = s.position if np.all(np.isfinite(s.position)) else np.array([0, 0, -10.0])
         set_xform(x.GetPrim(), p)
         pr = x.GetPrim()
-        for k, v in {"slot_id": s.id, "kind": s.kind, "anchor": s.anchor, "acoustic_region": s.acoustic_region or ""}.items():
+        for k, v in {
+            "slot_id": s.id,
+            "kind": s.kind,
+            "anchor": s.anchor,
+            "acoustic_region": s.acoustic_region or "",
+        }.items():
             pr.CreateAttribute(f"medortrace:{k}", Sdf.ValueTypeNames.String).Set(v)
         for k in ("hidden_from_camera", "needs_top_view", "sterile"):
             pr.CreateAttribute(f"medortrace:{k}", Sdf.ValueTypeNames.Bool).Set(bool(getattr(s, k)))

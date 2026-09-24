@@ -122,7 +122,9 @@ def smooth_path(path_xy: np.ndarray, lethal: np.ndarray, grid: GridSpec) -> np.n
     while i < len(path_xy) - 1:
         j = len(path_xy) - 1
         while j > i + 1:
-            seg = np.linspace(path_xy[i], path_xy[j], int(np.ceil(np.linalg.norm(path_xy[j] - path_xy[i]) / (grid.res * 0.5))) + 2)
+            seg = np.linspace(
+                path_xy[i], path_xy[j], int(np.ceil(np.linalg.norm(path_xy[j] - path_xy[i]) / (grid.res * 0.5))) + 2
+            )
             c = grid.world_to_cell(seg)
             if not lethal[c[:, 0], c[:, 1]].any():
                 break

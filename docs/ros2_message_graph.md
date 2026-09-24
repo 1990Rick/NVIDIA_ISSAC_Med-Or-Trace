@@ -73,8 +73,9 @@ flowchart LR
   t_state & t_ver & t_prov & t_safe --> viz
 ```
 
-Dashed edges are alternatives: the Isaac OmniGraph replaces the bridge for clock, TF, odometry and lidar
-when `isaac_graph:=true`, and the drivers replace the bridge on the robot.
+Dashed edges are alternatives: the Isaac OmniGraph replaces the bridge for the clock, the lidar cloud and
+the sensor frames (`base_link -> *_link`) when `isaac_graph:=true`, and the drivers replace the bridge on
+the robot. In simulation, odometry and `odom -> base_link` always come from the bridge.
 
 ## Topics
 
@@ -84,9 +85,9 @@ QoS: R = reliable, BE = best effort, V = volatile, TL = transient local. The pro
 | topic | type | QoS | rate | producer | consumer |
 |---|---|---|---|---|---|
 | `/clock` | `rosgraph_msgs/Clock` | R, V, depth 1 (`clock`) | 1/sim step | sim_bridge or Isaac OmniGraph | all nodes (use_sim_time) |
-| `/tf` | `tf2_msgs/TFMessage` | R, V, depth 100 (`tf`) | 10 Hz | sim_bridge / base driver (odom->base_link), autonomy (map->odom) | rviz, drivers |
+| `/tf` | `tf2_msgs/TFMessage` | R, V, depth 100 (`tf`) | 10 Hz | sim_bridge / base driver (odom->base_link), autonomy (map->odom), Isaac OmniGraph (base_link->*_link, `isaac_graph:=true`) | rviz, drivers |
 | `/tf_static` | `tf2_msgs/TFMessage` | R, TL (tf2 default) | once | `static_transform_publisher` from `configs/robot/rig.yaml` | rviz, drivers |
-| `/medortrace/sensors/lidar/points` | `sensor_msgs/PointCloud2` | BE, V, depth 2 (`sensor_dense`) | 5 Hz | sim_bridge or Isaac RTX lidar or lidar driver | autonomy |
+| `/medortrace/sensors/lidar/points` | `sensor_msgs/PointCloud2` | BE, V, depth 2 (`sensor_dense`) | 5 Hz | sim_bridge or Isaac OmniGraph RTX lidar or lidar driver | autonomy |
 | `/medortrace/sensors/camera/rgb` | `sensor_msgs/Image` | BE, V, depth 2 (`sensor_dense`) | 5 Hz | Isaac OmniGraph or camera driver | detector (external), rviz |
 | `/medortrace/sensors/camera/depth` | `sensor_msgs/Image` | BE, V, depth 2 (`sensor_dense`) | 5 Hz | Isaac OmniGraph or camera driver | detector (external) |
 | `/medortrace/sensors/camera/camera_info` | `sensor_msgs/CameraInfo` | BE, V, depth 5 (`sensor_data`) | 5 Hz | Isaac OmniGraph or camera driver | detector (external) |
@@ -96,7 +97,7 @@ QoS: R = reliable, BE = best effort, V = volatile, TL = transient local. The pro
 | `/medortrace/sensors/radar/points` | `sensor_msgs/PointCloud2` | BE, V, depth 5 (`sensor_data`) | 10 Hz | radar driver (physical robot) | autonomy (`radar.input: pointcloud2`) |
 | `/medortrace/sensors/acoustic/echoes` | `medortrace_msgs/AcousticFrame` | BE, V, depth 5 (`sensor_data`) | 2 Hz while probing | sim_bridge or acoustic probe driver | autonomy |
 | `/medortrace/sensors/imu` | `sensor_msgs/Imu` | BE, V, depth 50 (`sensor_data`) | 100 Hz | sim_bridge or IMU driver | autonomy |
-| `/medortrace/odom` | `nav_msgs/Odometry` | BE, V, depth 5 (`sensor_data`) | 10 Hz | sim_bridge or Isaac OmniGraph or base driver | autonomy |
+| `/medortrace/odom` | `nav_msgs/Odometry` | BE, V, depth 5 (`sensor_data`) | 10 Hz | sim_bridge (also with `isaac_graph:=true`) or base driver | autonomy |
 | `/medortrace/sensors/contact` | `medortrace_msgs/ContactState` | BE, V, depth 5 (`sensor_data`) | 10 Hz | sim_bridge or bumper / arm driver | autonomy |
 | `/medortrace/battery` | `sensor_msgs/BatteryState` | BE, V, depth 5 (`sensor_data`) | 1-10 Hz | sim_bridge or BMS driver | autonomy |
 | `/medortrace/workflow/events` | `medortrace_msgs/WorkflowEvent` | R, TL, depth 1000 (`events`) | sporadic | sim_bridge or workflow_gateway | autonomy |
@@ -112,7 +113,7 @@ QoS: R = reliable, BE = best effort, V = volatile, TL = transient local. The pro
 | `/medortrace/planning/nbv` | `medortrace_msgs/NextBestView` | R, TL, depth 1 (`state`) | on change | autonomy | dashboards, rosbag |
 | `/medortrace/planning/path` | `nav_msgs/Path` | R, TL, depth 1 (`state`) | on change | autonomy | rviz |
 | `/medortrace/verification/verdicts` | `medortrace_msgs/ClaimVerdict` | R, TL, depth 2000 (`audit`) | sporadic | autonomy | operator_console, OR information system |
-| `/medortrace/provenance/events` | `medortrace_msgs/ProvenanceEvent` | R, TL, depth 2000 (`audit`) | ~10-40 Hz | autonomy | audit logger, rosbag |
+| `/medortrace/provenance/events` | `medortrace_msgs/ProvenanceEvent` | R, TL, depth 20000 (`audit` + override) | ~10-40 Hz (nominal ~17) | autonomy | audit logger, rosbag |
 | `/medortrace/safety/state` | `medortrace_msgs/SafetyState` | R, TL, depth 1 (`state`) | 10 Hz | autonomy | operator_console, rviz |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | R, V, depth 5 (`state_volatile`) | 1 Hz | autonomy (assembler health), sim_bridge | rqt_robot_monitor |
 | `/medortrace/sim/ground_truth/odom` | `nav_msgs/Odometry` | R, V, depth 5 (`state_volatile`) | 10 Hz | sim_bridge (simulation only) | operator_console (auto mode), evaluation |
@@ -130,7 +131,7 @@ Services (all served by `autonomy_node`):
 
 | ROS 2 | medortrace (`medortrace/common/msgs.py` unless noted) | notes |
 |---|---|---|
-| `sensor_msgs/PointCloud2` | `LidarScan` | one point per **ray**; fields `x y z intensity ring range dir_x dir_y dir_z` (+ `gt_ghost gt_object` in simulation); no-return rays have `range = inf`, `x y z = NaN`. Clouds without `dir_*` fields (drivers, Isaac RTX helper) are converted from `x y z`, and the missing rays of the scan pattern can be re-created (`lidar.fill_no_return_rays`) |
+| `sensor_msgs/PointCloud2` | `LidarScan` | one point per **ray**; fields `x y z intensity ring range dir_x dir_y dir_z` (+ `gt_ghost gt_object` in simulation); no-return rays have `range = inf`, `x y z = NaN`. Clouds without `dir_*` fields (drivers, Isaac RTX helper) come at the sensor's native resolution without no-return rays. With `lidar.regrid_to_pattern` they are re-binned onto the stack's ray grid: the OR16 rings x `sensors.lidar.az_res_deg` (2 deg), so 16 x 180 = 2,880 rays, keeping the nearest return per cell. Empty cells become no-return rays. This is `medortrace.isaac.sensors.grid_scan`, the same binning `IsaacBackend` applies in-process. The native 16 x 1800 rays would cost the stack several control periods per scan |
 | `medortrace_msgs/CameraDetectionArray` / `CameraDetection` / `SurfaceObservation` | `CameraFrame` / `CameraDetection` / `surfaces` | `class_names` gives the logit order; logits are re-ordered to the stack's `CLASSES` |
 | `medortrace_msgs/RadarDetectionArray` / `RadarDetection` | `RadarFrame` / `RadarDetection` | or a radar driver `PointCloud2` (x, y, z, velocity, intensity) with `radar.input: pointcloud2` |
 | `medortrace_msgs/AcousticFrame` / `AcousticEcho` | `AcousticFrame` / `AcousticEcho` | `gt_hard_reflector`: -1 unknown, 0, 1 |
@@ -143,7 +144,7 @@ Services (all served by `autonomy_node`):
 | `geometry_msgs/Twist` + `std_msgs/String` probe target | `VelocityCommand` | `acoustic_probe_target` travels on `/medortrace/acoustic/probe_target` ("" = none) |
 | `medortrace_msgs/ItemBeliefArray` / `ItemBelief` | `belief.items.ItemBelief` | one slot list per array; per item `probabilities`, MAP slot, entropy, last tag read |
 | `medortrace_msgs/ClaimVerdict` | `provenance.verifier.VerdictRecord` + `ProvenanceGraph.explain` | VERIFIED=0 REFUTED=1 ABSTAIN=2; evidence ids and log-likelihood weights; hash of the verdict node |
-| `medortrace_msgs/ProvenanceEvent` | `provenance.graph.Node` | `index, prev_hash, hash, json_attrs, t` suffice to re-verify the chain (`records.verify_provenance_stream`) |
+| `medortrace_msgs/ProvenanceEvent` | `provenance.graph.Node` | `index, prev_hash, hash, json_attrs, t` suffice to re-verify the chain (`records.verify_provenance_stream`; a late joiner's suffix with `anchor=` or `allow_suffix=True`) |
 | `medortrace_msgs/SafetyState` | `safety.supervisor` mode + `SafetyInputs` signals | modes NOMINAL=0 .. HANDOVER=4 (same codes as `data/writer.py:MODE_CODE`) |
 | `medortrace_msgs/NextBestView` | `planning.nbv.ViewGoal` | `Pose2D` pose, `nav_msgs/Path`, score breakdown as key / value arrays |
 | `medortrace_msgs/SceneGraph` | `belief.scene_graph.build_scene_graph` | JSON |
@@ -195,6 +196,11 @@ flowchart TD
   base_link -->|static| imu_link
 ```
 
+The tree is the same in every deployment. With `isaac_graph:=true` the OmniGraph's `PublishSensorTF`
+provides the `base_link -> *_link` edges, and the bridge keeps publishing `odom -> base_link`. The graph's
+own `PublishTF` would parent `base_link` to the stage frame `World`, so `sim_bridge_node` deletes that node
+along with the graph's odometry nodes (`handover_base_tf`).
+
 The static extrinsics come from `configs/robot/rig.yaml` (`frames`). The same file is the single source for
 the USD rig and the lite simulator's mount parameters. The launch files publish them with
 `tf2_ros static_transform_publisher` (`medortrace_ros.launch_utils.rig_static_tf_nodes`). `base_link` is
@@ -211,8 +217,8 @@ the floor-level footprint centre, x forward, z up (REP 103/105). Rotations use f
 The stack models each sensor by its rig mount, not by a TF lookup. Driver `frame_id`s therefore have to be the
 rig's `*_link` names, or be aliased by a static transform. Image topics conventionally use an optical frame
 (`camera_link` -> `camera_optical_frame`, rpy -90, 0, -90 deg). Only the external detector uses it, because
-detections are published in `camera_link`. With `isaac_graph:=true` the OmniGraph publishes the robot and
-sensor frames itself, under the stage's world frame, and the launch file does not re-publish the rig TF.
+detections are published in `camera_link`. With `isaac_graph:=true` the OmniGraph publishes the sensor
+frames under `base_link`, so the launch file does not re-publish the rig TF.
 
 ## QoS rationale
 
@@ -220,9 +226,18 @@ sensor frames itself, under the stage's world frame, and the launch file does no
   less than a fresh one, and the assembler uses only the newest message per tick anyway. Best-effort
   subscribers also accept both best-effort and reliable driver publishers, so no driver QoS change is
   needed on the robot.
-* **Verdicts and provenance** are reliable and transient-local with depth 2000. They are the audit record:
-  dropping one breaks the hash chain on the receiving side. A late joiner (OR dashboard, audit logger,
-  restarted console) gets the history.
+* **Verdicts and provenance** are reliable and transient-local. They are the audit record: dropping one
+  breaks the hash chain on the receiving side. A late joiner (OR dashboard, audit logger, restarted
+  console) gets the newest `depth` messages of the history, and subscribers must use the same profile
+  (`medortrace_ros.qos.qos_profile`) to keep that much. Verdicts use depth 2000; a case has tens of claims.
+  Provenance runs at about 17 events/s nominal (up to about 40/s) and uses depth 20000. That holds a
+  complete default case (180 s, about 3,000 events) with margin, or about 20 minutes at the nominal rate,
+  at about 0.5 kB per event. `records.verify_provenance_stream` checks a complete history from `GENESIS`.
+  In a longer case a late joiner holds only a suffix. It verifies the suffix against the last event it
+  stored before a restart (`anchor=(index, hash)`), or, with `allow_suffix=True`, as a contiguous chain whose
+  first `prev_hash` is taken on trust. The complete chain is in the autonomy node's audit export
+  (`audit_dir`) or in a recording started with the mission. The history is bounded (KEEP_LAST) rather than
+  KEEP_ALL, so publisher memory stays bounded and a full history never blocks the control loop.
 * **Workflow events** are reliable and transient-local with depth 1000. They are reports that must not be
   lost, and a restarted autonomy node must receive the case so far; `event_id` de-duplication makes the
   replay harmless.
@@ -241,7 +256,7 @@ remapped onto the drivers' topics (defaults below; override per platform). Nothi
 
 | stack topic | launch argument | default driver topic | driver message |
 |---|---|---|---|
-| `/medortrace/sensors/lidar/points` | `lidar_topic` | `/ouster/points` | `sensor_msgs/PointCloud2` (no-return rays re-created from the OR16 pattern) |
+| `/medortrace/sensors/lidar/points` | `lidar_topic` | `/ouster/points` | `sensor_msgs/PointCloud2` (re-binned onto the OR16 rings x 2 deg grid of the stack, empty cells as no-return rays) |
 | `/medortrace/perception/camera/detections` | `camera_detections_topic` | `/detector/detections` | `medortrace_msgs/CameraDetectionArray` (on-robot detector) |
 | `/medortrace/perception/landmarks` | `landmarks_topic` | `/fiducials/observations` | `medortrace_msgs/LandmarkObservationArray` |
 | `/medortrace/sensors/radar/detections` | `radar_topic` | `/radar/detections` | `medortrace_msgs/RadarDetectionArray` (`radar_input:=detections`) |
@@ -273,10 +288,15 @@ Other differences on the robot:
   The bridge publishes exactly the lite topic set, in lockstep.
 * With `isaac_graph:=true` the OmniGraph of `medortrace.isaac.ros2_bridge` is also built, through
   `IsaacBackend.add_reset_hook(ros2_reset_hook(drive_from_cmd_vel=False))`. The graph then publishes
-  clock, TF, odometry, the RTX lidar cloud and RGB/depth/camera_info, and the bridge skips those topics.
-  The wheels keep a single controller.
+  the clock, the RTX lidar cloud, RGB/depth/camera_info and the sensor frames, and the bridge skips the
+  clock and lidar topics. A second reset hook (`sim_bridge_node.handover_base_tf`) deletes the graph's
+  world-parented `base_link` TF and its odometry nodes. The bridge keeps publishing `/medortrace/odom` and
+  `odom -> base_link` from the backend's wheel odometry, which carries the same fault model as in lockstep
+  mode. The autonomy node re-bins the RTX cloud (`lidar.regrid_to_pattern`) onto the grid `IsaacBackend`
+  uses in-process. The wheels keep a single controller.
 * Alternatively, `scripts/isaac/ros2_sim.py --bridge medortrace_ros.sim_bridge_node:create` drives the
   robot through the OmniGraph twist subscriber (`drive="external"`). The `create(backend)` factory then
-  publishes only the custom-message topics of each bundle.
+  applies `handover_base_tf` too. It publishes odometry and `odom -> base_link` from the bundles, the
+  custom-message topics of each bundle, the mission and the ground truth.
 * The Isaac process needs `rclpy` and `medortrace_msgs` built for Isaac's Python version (see the package
   README).

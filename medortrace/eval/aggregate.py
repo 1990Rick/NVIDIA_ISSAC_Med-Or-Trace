@@ -86,6 +86,8 @@ def markdown_table(summary: list[dict], metrics: list[str], group_keys=("family"
         cells = [str(rec[k]) for k in group_keys] + [str(rec["n"])]
         for m in metrics:
             v = rec[m]
-            cells.append("n/a" if not np.isfinite(v["mean"]) else f"{v['mean']:.3f} [{v['ci95'][0]:.3f}, {v['ci95'][1]:.3f}]")
+            cells.append(
+                "n/a" if not np.isfinite(v["mean"]) else f"{v['mean']:.3f} [{v['ci95'][0]:.3f}, {v['ci95'][1]:.3f}]"
+            )
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)

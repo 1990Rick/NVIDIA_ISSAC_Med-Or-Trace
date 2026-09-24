@@ -238,11 +238,17 @@ class AutonomyNode:
                            "rcs_is_db": bool(p("radar.rcs_is_db", False))}
         self.lidar_height = float(p("lidar.sensor_height", -1.0))
         self.lidar_pattern = None
-        if bool(p("lidar.fill_no_return_rays", False)):
+        regrid = bool(p("lidar.regrid_to_pattern", False))
+        if bool(p("lidar.fill_no_return_rays", False)):            # pre-regrid name of the same switch
+            self.log.warn("parameter lidar.fill_no_return_rays is deprecated; use lidar.regrid_to_pattern")
+            regrid = True
+        if regrid:
+            # az_res_deg / max_range <= 0: the stack's sensors.lidar values of the mission cfg (set in _start)
             self.lidar_pattern = {"rings": int(p("lidar.pattern.rings", 16)),
                                   "elev_min_deg": float(p("lidar.pattern.elev_min_deg", -15.0)),
                                   "elev_max_deg": float(p("lidar.pattern.elev_max_deg", 15.0)),
-                                  "az_res_deg": float(p("lidar.pattern.az_res_deg", 0.2))}
+                                  "az_res_deg": float(p("lidar.pattern.az_res_deg", 0.0)),
+                                  "max_range": float(p("lidar.pattern.max_range", 0.0))}
         self.max_age = {c: float(p(f"max_age.{c}", v)) for c, v in AssemblerConfig().max_age_s.items()
                         if c != "workflow"}
         src = str(p("mission_source", "topic"))
@@ -303,8 +309,15 @@ class AutonomyNode:
         if pol:
             overrides = deep_merge(overrides, {"autonomy": {"policy": pol}})
         inputs, cfg = stack_setup(mission, base, overrides)
+        lidar_cfg = cfg.get("sensors", {}).get("lidar", {})
         if self.lidar_height <= 0:
-            self.lidar_height = float(cfg.get("sensors", {}).get("lidar", {}).get("mount_height", lidar_mount()[1]))
+            self.lidar_height = float(lidar_cfg.get("mount_height", lidar_mount()[1]))
+        if self.lidar_pattern is not None:
+            from medortrace_ros.convert import pattern_ray_count, resolve_lidar_pattern
+
+            self.lidar_pattern = resolve_lidar_pattern(self.lidar_pattern, lidar_cfg)
+            self.log.info(f"lidar clouds re-binned onto {self.lidar_pattern} "
+                          f"({pattern_ray_count(self.lidar_pattern)} rays per scan)")
         origin = str(p("time_origin", "mission"))
         now = self._ros_now()
         if origin == "zero":
