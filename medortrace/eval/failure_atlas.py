@@ -630,7 +630,9 @@ def _d_retained(r, m, c) -> Detection | None:
 
 def _d_cf(r, m, c) -> Detection | None:
     f, v = factor_of(r), cf_value_of(r)
-    if f == "CF-B" and _has(m, "cfb_correct") and _num(m, "cfb_correct") == 0:
+    observed_b = not _has(m, "cfb_observed") or _num(m, "cfb_observed") > 0
+    observed_d = not _has(m, "cfd_observable") or _num(m, "cfd_observable") > 0
+    if f == "CF-B" and observed_b and _has(m, "cfb_correct") and _num(m, "cfb_correct") == 0:
         p, dmin = _num(m, "cfb_belief_occupied"), _num(m, "cfb_min_dist_to_aisle_point")
         hit = _num(m, "cfb_traversed") > 0 or (_num(m, "cfb_collision") > 0 and dmin < 1.0)
         unsafe = v == "real_obstacle" and hit
@@ -643,7 +645,7 @@ def _d_cf(r, m, c) -> Detection | None:
     if f == "CF-C" and _num(m, "cfc_clamp_wrongly_verified") > 0:
         return 100.0, "CF-C clamp wrongly verified", {"hc_value": v, "cfc_final_map_slot": m.get("cfc_final_map_slot"),
                                                        "cfc_final_map_correct": _num(m, "cfc_final_map_correct")}
-    if f == "CF-D" and _has(m, "cfd_correct") and _num(m, "cfd_correct") == 0:
+    if f == "CF-D" and observed_d and _has(m, "cfd_correct") and _num(m, "cfd_correct") == 0:
         dg = m.get("cfd_diagnosis", "none")
         want = "loc_drift" if v == "loc_drift" else "map_change"
         sub = "CF-D no diagnosis" if dg in (None, "none") else f"CF-D {want} diagnosed as {dg}"

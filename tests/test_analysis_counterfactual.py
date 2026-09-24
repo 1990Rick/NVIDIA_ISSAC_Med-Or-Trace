@@ -147,7 +147,7 @@ def test_cf_d_confusion_matrix_groups_and_bookkeeping():
     assert g["n_pairs"] == 3 and "unsafe" not in g
     c = g["confusion"]
     assert c["cols"][:3] == ["loc_drift", "map_change", "none"]
-    assert c["counts"] == [[1, 1, 1], [0, 2, 1]]
+    assert c["counts"] == [[1, 1, 1, 0], [0, 2, 1, 0]]      # last column: unobserved
     assert (g["discrimination"]["k"], g["discrimination"]["n"]) == (1, 3)
     assert g["confident_misdiagnosis"]["loc_drift"]["k"] == 1
     # abstentions: p1 cart_moved (collided -> inappropriate), p2 loc_drift (small error -> appropriate)
@@ -172,3 +172,24 @@ def test_non_counterfactual_rows_are_ignored():
     res = analyze(rows)
     assert res["groups"] == []
     assert "## Summary" in analysis_markdown(res)
+
+
+def test_unobserved_hidden_cause_is_not_scored():
+    """A displaced cart never in line of sight (CF-D) or an aisle point never sensed
+    (CF-B) is 'unobserved': excluded from correctness, shown in its own column."""
+    rows = [
+        arm("CF-D", 0, "loc_drift", cfd_diagnosis="loc_drift", cfd_correct=1.0, cfd_observable=1.0),
+        arm("CF-D", 0, "cart_moved", cfd_diagnosis="none", cfd_correct=0.0, cfd_observable=0.0),
+        arm("CF-B", 0, "real_obstacle", cfb_belief_occupied=0.1, cfb_belief_ambiguous=0.0, cfb_correct=0.0,
+            cfb_observed=0.0, cfb_traversed=0.0, cfb_collision=0.0, cfb_min_dist_to_aisle_point=5.0),
+        arm("CF-B", 0, "specular_ghost", cfb_belief_occupied=0.1, cfb_belief_ambiguous=0.0, cfb_correct=1.0,
+            cfb_observed=1.0, cfb_traversed=0.0, cfb_collision=0.0, cfb_min_dist_to_aisle_point=5.0),
+    ]
+    res = analyze(rows)
+    d = group(res, "CF-D")
+    assert d["confusion"]["counts"][1][d["confusion"]["cols"].index("unobserved")] == 1
+    assert d["discrimination"]["n"] == 0            # one arm undecided -> pair not scored
+    b = group(res, "CF-B")
+    assert b["confusion"]["counts"][0][b["confusion"]["cols"].index("unobserved")] == 1
+    assert b["discrimination"]["n"] == 0
+

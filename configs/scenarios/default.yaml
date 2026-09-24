@@ -28,7 +28,8 @@ workflow:
   p_log_missing: 0.05
   log_time_jitter_s: 1.5
   p_log_mislabel: 0.02
-  claim_grace_s: 25.0
+  claim_grace_s: 25.0          # verification window of a handoff / place / discard claim
+  count_grace_s: 90.0          # verification window of each item claim implied by a surgical count
 
 faults:
   dropout_rate_per_min: {}    # e.g. {lidar: 0.5, camera: 1.0}

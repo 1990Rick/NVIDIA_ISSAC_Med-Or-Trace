@@ -68,7 +68,8 @@ class StackInputs:
     start_pose: np.ndarray
     dock: np.ndarray
     duration: float
-    claim_grace: float = 25.0
+    claim_grace: float = 25.0               # verification window of a handoff claim (s)
+    count_grace: float = 90.0               # ... of a count claim (a surgical count takes minutes)
 
 
 @dataclass
@@ -270,7 +271,7 @@ class AutonomyStack:
         for due, ev in list(self.pending_counts):
             if t >= due:
                 for c in count_claims(ev, [e for e in self.log_seen if e.type != WorkflowEventType.COUNT],
-                                      self.inp.initial_placement, self.inp.duration, self.inp.claim_grace):
+                                      self.inp.initial_placement, self.inp.duration, self.inp.count_grace):
                     self.verifier.add_claim(c)
                 self.pending_counts.remove((due, ev))
         # ---------------- camera -------------------------------------------
@@ -333,7 +334,9 @@ class AutonomyStack:
     def _occluding_people(self, tracks) -> np.ndarray:
         """Tracked people plus the scrubbed team at their stations (prior knowledge:
         scrubbed staff stand at the table even when the tracker cannot see them)."""
-        sel = [tr for tr in tracks if tr.identity or np.linalg.norm(tr.x[2:]) > 0.2]
+        # person_like: has an identity or has *ever* moved like a person - a
+        # nurse standing still is still a person (a cart that never moves is not)
+        sel = [tr for tr in tracks if tr.person_like]
         pts = [tr.x[:2] for tr in sel]
         names = [tr.identity for tr in sel]
         for nm in self.sterile_staff:
@@ -351,13 +354,13 @@ class AutonomyStack:
         trs = self.tracker.tracks
         for k, c in enumerate(lp.person_clusters):
             for tr in trs:
-                if np.linalg.norm(tr.x[:2] - c) < 0.6 and (tr.identity or np.linalg.norm(tr.x[2:]) > 0.2):
+                if np.linalg.norm(tr.x[:2] - c) < 0.6 and tr.person_like:
                     dyn |= lp.cluster_labels == k
                     break
         return dyn
 
     def _human_clearance(self, pose, tracks) -> float:
-        people = [tr for tr in tracks if tr.identity or np.linalg.norm(tr.x[2:]) > 0.2]
+        people = [tr for tr in tracks if tr.person_like]
         if not people:
             return 10.0
         return float(min(np.linalg.norm(tr.x[:2] - pose[:2]) for tr in people) - self.radius - 0.25)
@@ -683,4 +686,5 @@ def stack_inputs_from_episode(ep) -> StackInputs:
         zones=copy.deepcopy(sv.sterile_zones), landmarks=copy.deepcopy(sv.landmarks), items=copy.deepcopy(sv.items),
         initial_placement=dict(ep.workflow.initial), staff=copy.deepcopy(sv.staff),
         start_pose=np.array([sv.robot_start[0], sv.robot_start[1], sv.robot_start[2]]), dock=sv.dock.copy(),
-        duration=ep.workflow.duration, claim_grace=float(ep.cfg.get("workflow", {}).get("claim_grace_s", 25.0)))
+        duration=ep.workflow.duration, claim_grace=float(ep.cfg.get("workflow", {}).get("claim_grace_s", 25.0)),
+        count_grace=float(ep.cfg.get("workflow", {}).get("count_grace_s", 90.0)))

@@ -97,6 +97,7 @@ def test_workflow_log_delivered_after_t_ref_is_not_direct_evidence():
     # count claims take t_ref = the count time; a log entry reported <= 1 s later and delivered
     # late reaches the belief *after* the t_ref snapshot and is not cut off by note_item_event
     bel, prov, ver = _setup(n_events=0)
+    ver.open["c1"].claim.kind = "count"                         # (a handoff claim would be superseded)
     assert ver.step(10.0) == []                                 # snapshot: the clamp is on the table
     for k in range(2):
         prov.add_evidence(f"wf:late{k}", 10.5, "workflow", {"dst": "bin:inside"}, attributed_to="scrub_nurse")
@@ -207,3 +208,21 @@ def test_fixed_lag_smoothing_ignores_evidence_after_reported_move():
     # a move reported at (or just after) t_ref does not invalidate the claim window
     v_early, _ = _smoothing_run(report_move=True, move_t=10.5)
     assert v_early.verdict != Verdict.VERIFIED
+
+
+def test_handoff_claim_superseded_by_a_move_reported_before_t_ref():
+    """A sponge discarded seconds after reaching the field: the handoff claim's
+    placement was transient, so it is closed as ABSTAIN (never checked against the
+    post-move state); a move reported after t_ref only ends the smoothing window."""
+    bel, prov, ver = _setup(n_events=0)                         # claim c1: clamp at bin:inside, t_ref = 10
+    ver.note_item_event("clamp_1", 8.0)                         # moved on before t_ref
+    (v,) = ver.step(8.5)                                        # closed at once, before t_ref
+    assert v.verdict == Verdict.ABSTAIN and "superseded" in v.reason and "c1" in ver.done
+    bel, prov, ver = _setup(n_events=0)
+    ver.note_item_event("clamp_1", 12.0)                        # after t_ref + 1 s: window cut, claim stays open
+    assert ver.step(12.5) == [] and ver.open["c1"].moved_t == 12.0 and not ver.open["c1"].superseded
+    bel, prov, ver = _setup(n_events=0)
+    ver.open["c1"].claim.kind = "count"                         # counts are never superseded
+    ver.note_item_event("clamp_1", 8.0)
+    assert ver.step(8.5) == [] and not ver.open["c1"].superseded
+

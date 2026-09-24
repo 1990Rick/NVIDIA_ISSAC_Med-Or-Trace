@@ -235,7 +235,7 @@ def generate_workflow(spec: SceneSpec, cfg: dict, streams: RngStreams) -> Workfl
 
     # ---- claims (same deterministic rule the robot applies online) -----------
     grace = float(wcfg.get("claim_grace_s", 25.0))
-    claims = claims_from_log(log, initial, T, grace)
+    claims = claims_from_log(log, initial, T, grace, float(wcfg.get("count_grace_s", 90.0)))
 
     return WorkflowScript(T, truth, log, tasks, claims, initial, notes)
 
@@ -270,13 +270,18 @@ def count_claims(count_ev: WorkflowEvent, log_so_far: list[WorkflowEvent], initi
     return out
 
 
-def claims_from_log(log: list[WorkflowEvent], initial: dict[str, str], T: float, grace: float) -> list[Claim]:
+def claims_from_log(log: list[WorkflowEvent], initial: dict[str, str], T: float, grace: float,
+                    count_grace: float | None = None) -> list[Claim]:
+    """Claims implied by the workflow log.  Handoff claims get ``grace`` seconds for
+    verification; count claims get ``count_grace`` (default: ``grace``) - a count
+    reconciles every item and takes minutes, not seconds."""
     claims: list[Claim] = []
     for ev in log:
         c = handoff_claim(ev, T, grace)
         if c:
             claims.append(c)
         if ev.type == WT.COUNT:
-            claims.extend(count_claims(ev, [e for e in log if e.type != WT.COUNT], initial, T, grace))
+            claims.extend(count_claims(ev, [e for e in log if e.type != WT.COUNT], initial, T,
+                                       grace if count_grace is None else count_grace))
     claims.sort(key=lambda c: c.t_due)
     return claims

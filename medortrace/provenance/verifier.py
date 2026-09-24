@@ -42,6 +42,7 @@ class OpenClaim:
     direct: bool = False
     moved: bool = False
     moved_t: float = float("inf")
+    superseded: bool = False      # item reported moved on before t_ref (transient state)
     contributions: dict[str, float] = field(default_factory=dict)
 
 
@@ -79,11 +80,19 @@ class ClaimVerifier:
         self.open[c.id] = OpenClaim(c)
 
     def note_item_event(self, item_id: str, t_event: float) -> None:
-        """A reported move after t_ref invalidates smoothing for claims on that item."""
+        """A reported move after t_ref ends the smoothing window of claims on that item;
+        a move reported *before* a handoff claim's t_ref supersedes the claim - the
+        asserted placement was transient and the robot can no longer check it (e.g. a
+        sponge discarded seconds after reaching the field).  Called before the new
+        event's own claim is added, so an event never supersedes itself."""
         for oc in self.open.values():
-            if oc.claim.item_id == item_id and t_event > oc.claim.t_ref + 1.0:
+            if oc.claim.item_id != item_id:
+                continue
+            if t_event > oc.claim.t_ref + 1.0:
                 oc.moved = True
                 oc.moved_t = min(oc.moved_t, t_event)
+            elif oc.claim.kind == "handoff":
+                oc.superseded = True
 
     def pending(self) -> list[Claim]:
         return [oc.claim for oc in self.open.values()]
@@ -94,6 +103,11 @@ class ClaimVerifier:
         for cid in list(self.open):
             oc = self.open[cid]
             c = oc.claim
+            if oc.superseded:
+                p_now = float(self.belief.prob(c.item_id, c.slot_id)) if c.slot_id in self.belief.sidx else float("nan")
+                out.append(self._close(cid, oc, t, Verdict.ABSTAIN,
+                                       "superseded: item reported moved again before t_ref", p_now, None))
+                continue
             if t < c.t_ref:
                 continue
             k = self.belief.sidx.get(c.slot_id)
@@ -144,16 +158,22 @@ class ClaimVerifier:
                 decided = (Verdict.ABSTAIN, reason)
             if decided is None or (not self.early and t < c.t_due):
                 continue
-            ms = self.belief.slot_ids[int(np.argmax(post))]
-            vr = VerdictRecord(cid, t, decided[0], p, decided[1], c.item_id, c.slot_id, c.t_ref, c.kind, ms, oc.direct)
-            self.done[cid] = vr
-            del self.open[cid]
-            contrib = sorted(oc.contributions.items(), key=lambda kv: -abs(kv[1]))[:8]
-            self.prov.add_verdict(f"verdict:{cid}", t, {"claim_id": cid, "item_id": c.item_id, "slot_id": c.slot_id,
-                                                         "t_ref": c.t_ref, "kind": c.kind},
-                                  vr.verdict, p, vr.reason, contrib)
-            out.append(vr)
+            out.append(self._close(cid, oc, t, decided[0], decided[1], p, post))
         return out
+
+    def _close(self, cid: str, oc: OpenClaim, t: float, verdict: Verdict, reason: str, p: float,
+               post: np.ndarray | None) -> VerdictRecord:
+        c = oc.claim
+        b = post if post is not None else self.belief.items[c.item_id].b
+        ms = self.belief.slot_ids[int(np.argmax(b))]
+        vr = VerdictRecord(cid, t, verdict, p, reason, c.item_id, c.slot_id, c.t_ref, c.kind, ms, oc.direct)
+        self.done[cid] = vr
+        del self.open[cid]
+        contrib = sorted(oc.contributions.items(), key=lambda kv: -abs(kv[1]))[:8]
+        self.prov.add_verdict(f"verdict:{cid}", t, {"claim_id": cid, "item_id": c.item_id, "slot_id": c.slot_id,
+                                                     "t_ref": c.t_ref, "kind": c.kind},
+                              vr.verdict, p, vr.reason, contrib)
+        return vr
 
     def urgency(self, t: float) -> dict[str, float]:
         """Per-item urgency weight for active perception (pending, soon-due claims)."""

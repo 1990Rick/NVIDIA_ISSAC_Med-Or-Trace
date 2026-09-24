@@ -81,6 +81,8 @@ def _decide_b(m: dict) -> str:
     p, amb = _num(m, "cfb_belief_occupied"), _num(m, "cfb_belief_ambiguous")
     if not math.isfinite(p):
         return "unknown"
+    if "cfb_observed" in m and _num(m, "cfb_observed") == 0:
+        return "unobserved"          # the prior's "free" at an unsensed point is not a decision
     if p > 0.5:
         return "occupied"
     return "ambiguous" if math.isfinite(amb) and amb >= 0.5 else "free"
@@ -102,7 +104,11 @@ def _decide_c(m: dict) -> str:
 
 def _decide_d(m: dict) -> str:
     d = m.get("cfd_diagnosis")
-    return "unknown" if d is None else str(d)
+    if d is None:
+        return "unknown"
+    if "cfd_observable" in m and _num(m, "cfd_observable") == 0:
+        return "unobserved"          # the displaced cart was never in line of sight
+    return str(d)
 
 
 def _unsafe_a(m: dict) -> bool | None:
@@ -129,6 +135,9 @@ def _abst_c(m: dict) -> bool | None:
     return not (_num(m, "cfc_clamp_refuted") > 0 or _num(m, "cfc_clamp_wrongly_verified") > 0)
 
 
+NOT_DECIDED = ("unknown", "unobserved")   # excluded from correctness / abstention rates
+
+
 @dataclass
 class FactorSpec:
     factor: str
@@ -149,7 +158,7 @@ class FactorSpec:
             self.unsafe_arms = (self.hazard,)
 
     def is_correct(self, arm: str, dec: str, m: dict) -> bool | None:
-        if dec == "unknown":
+        if dec in NOT_DECIDED:
             return None
         if self.factor == "CF-C":
             # the final MAP location is right *and* the clamp was never wrongly VERIFIED on the way
@@ -161,12 +170,12 @@ class FactorSpec:
     def is_strict(self, arm: str, dec: str, m: dict) -> bool | None:
         if self.factor == "CF-C":
             return self.is_correct(arm, dec, m)
-        return None if dec == "unknown" else dec in self.strict[arm]
+        return None if dec in NOT_DECIDED else dec in self.strict[arm]
 
     def is_abstention(self, dec: str, m: dict) -> bool | None:
         if self.abstained is not None:
             return self.abstained(m)
-        return None if dec == "unknown" else dec in self.abstain_labels
+        return None if dec in NOT_DECIDED else dec in self.abstain_labels
 
 
 FACTORS: dict[str, FactorSpec] = {
@@ -178,7 +187,7 @@ FACTORS: dict[str, FactorSpec] = {
     "CF-B": FactorSpec("CF-B", ("real_obstacle", "specular_ghost"), "real_obstacle", _decide_b,
                        {"real_obstacle": {"occupied", "ambiguous"}, "specular_ghost": {"free"}},
                        {"real_obstacle": {"occupied"}, "specular_ghost": {"free"}}, {"ambiguous"}, _unsafe_b,
-                       columns=("occupied", "ambiguous", "free"),
+                       columns=("occupied", "ambiguous", "free", "unobserved"),
                        description="aisle return: real obstacle behind the screen vs specular multipath ghost"),
     "CF-C": FactorSpec("CF-C", ("dropped_floor", "handed_off"), "dropped_floor", _decide_c,
                        {"dropped_floor": {"floor"}, "handed_off": {"hand", "back_table"}},
@@ -189,7 +198,7 @@ FACTORS: dict[str, FactorSpec] = {
     "CF-D": FactorSpec("CF-D", ("loc_drift", "cart_moved"), None, _decide_d,
                        {"loc_drift": {"loc_drift"}, "cart_moved": {"map_change"}},
                        {"loc_drift": {"loc_drift"}, "cart_moved": {"map_change"}}, {"none"},
-                       columns=("loc_drift", "map_change", "none"),
+                       columns=("loc_drift", "map_change", "none", "unobserved"),
                        description="scan/map mismatch: odometry drift vs instrument cart moved since the survey"),
 }
 

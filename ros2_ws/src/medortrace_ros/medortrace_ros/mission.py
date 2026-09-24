@@ -110,7 +110,8 @@ def stack_inputs_from_dict(d: dict) -> StackInputs:
         room=tuple(float(v) for v in d["room"]), prior_map=prior, slots=slots, zones=zones, landmarks=lms,
         items=items, initial_placement=dict(d["initial_placement"]), staff=staff,
         start_pose=np.asarray(d["start_pose"], float), dock=np.asarray(d["dock"], float),
-        duration=float(d["duration"]), claim_grace=float(d.get("claim_grace", 25.0)))
+        duration=float(d["duration"]), claim_grace=float(d.get("claim_grace", 25.0)),
+        count_grace=float(d.get("count_grace", 90.0)))
 
 
 # ---------------------------------------------------------------------------------------------------------------------

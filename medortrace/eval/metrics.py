@@ -33,7 +33,7 @@ ROBOT_R = 0.28
 HUMAN_R = 0.25
 LIDAR_MOUNT_Z = 0.9          # sensors_lite.LidarConfig.mount_height
 LOS_RANGE_M = 8.0            # beyond this a 0.7 m cart gets too few returns to explain
-CFD_MIN_LOS_S = 3.0          # seconds of line of sight for a displaced cart to count as observable
+CFD_MIN_LOS_S = 10.0         # seconds of line of sight for a displaced cart to count as observable
 
 
 def ece(p: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
@@ -251,6 +251,11 @@ def hidden_cause_outcome(ep, vt, stack, truth) -> dict:
         amb = float(np.clip(occ.ambiguous[sl], 0, 1).max())
         out["cfb_belief_occupied"] = p_occ
         out["cfb_belief_ambiguous"] = amb
+        # was the point ever sensed (a lidar return or free-space carving in the
+        # robot's height band, or ghost-suspect mass there)?  An unobserved point
+        # keeps the prior "free", which is not a decision.
+        k1 = int(np.ceil(1.5 / occ.res))
+        out["cfb_observed"] = float(bool(occ.observed[sl][:, :, 1:k1].any()) or amb > 0.05)
         if val == "real_obstacle":
             out["cfb_correct"] = float(p_occ > 0.5)
         else:
