@@ -279,11 +279,19 @@ def hidden_cause_outcome(ep, vt, stack, truth) -> dict:
         # keeps the prior "free", which is not a decision.
         k1 = int(np.ceil(1.5 / occ.res))
         out["cfb_observed"] = float(bool(occ.observed[sl][:, :, 1:k1].any()) or amb > 0.05)
+        # same decision rule as the pair analysis (counterfactual_analysis._decide_b):
+        # occupied (p > 0.5), ambiguous (ghost-suspect mass >= 0.5) or free.  Treating the
+        # point as possibly occupied is the safe answer for a real obstacle; only "free"
+        # is the right answer for a specular ghost.
+        decision = "occupied" if p_occ > 0.5 else ("ambiguous" if amb >= 0.5 else "free")
         if val == "real_obstacle":
-            out["cfb_correct"] = float(p_occ > 0.5)
+            out["cfb_correct"] = float(decision in ("occupied", "ambiguous"))
         else:
-            out["cfb_correct"] = float(p_occ < 0.5)
-        out["cfb_collision"] = float(any(truth.collision_static))
+            out["cfb_correct"] = float(decision == "free")
+        # a collision *at the hidden-cause location* (not anywhere in the episode)
+        cs = np.array(truth.collision_static, dtype=bool)
+        near_ap = np.linalg.norm(R[:, :2] - ap, axis=1) < 1.0 if len(R) else np.zeros(0, bool)
+        out["cfb_collision"] = float(bool(np.any(cs & near_ap))) if len(cs) == len(near_ap) else 0.0
     elif fac == "CF-C":
         rel = [(v, c, y) for v, c, y, f in vt if c.item_id == "clamp_1"]
         out["cfc_clamp_refuted"] = float(any(v.verdict.value == "REFUTED" for v, c, y in rel))

@@ -152,3 +152,26 @@ def test_retreat_persists_while_the_hazard_persists():
     for k in range(int((env.t_hold + 0.5) / 0.1)):
         sup.update(SafetyInputs(t0 + k * 0.1, human_clearance=3.0))
     assert sup.mode == Mode.CAUTION
+
+
+def test_contact_gate_aborts_on_anomalies_and_never_reports_a_lost_item_placed():
+    from medortrace.manipulation.contact_gate import ContactGate, GateInputs, Phase
+
+    def run(seq):
+        g = ContactGate()
+        for k, kw in enumerate(seq):
+            base = dict(t=float(k), base_speed=0.0, item_prob=0.95, human_clearance=2.0, contact_force=0.0,
+                        in_contact=False, operator_approved=True, at_pre_grasp=True)
+            base.update(kw)
+            g.step(GateInputs(**base))
+        return g
+
+    grasp = dict(contact_force=10.0, in_contact=True)
+    ok = run([{}, {}, {}, grasp, {**grasp, "at_place": True}, {"at_place": True}])
+    assert ok.phase == Phase.DONE
+    lost = run([{}, {}, {}, grasp, {"contact_force": 0.0, "in_contact": False}, {"at_place": True}])
+    assert lost.phase == Phase.ABORT and "lost" in lost.abort_reason
+    spike = run([{}, {}, {}, grasp, {"contact_force": 40.0, "in_contact": True}])
+    assert spike.phase == Phase.ABORT and "spike" in spike.abort_reason
+    bump = run([{}, {}, {"contact_force": 12.0, "in_contact": True, "item_prob": 0.5}])
+    assert bump.phase == Phase.ABORT and "before grasp" in bump.abort_reason

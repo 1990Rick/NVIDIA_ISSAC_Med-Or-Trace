@@ -92,7 +92,10 @@ class ContactGate:
             elif x.at_pre_grasp and x.base_speed <= c.v_max_approach:
                 self._go(Phase.PRE_GRASP, x.t)
         elif self.phase == Phase.PRE_GRASP:
-            if x.item_prob >= c.p_item_min:
+            if x.in_contact and x.contact_force > c.f_unexpected:
+                self.abort_reason = "unexpected contact before grasp"
+                self._go(Phase.ABORT, x.t, self.abort_reason)
+            elif x.item_prob >= c.p_item_min:
                 self._go(Phase.GRASP, x.t)
             elif x.t - self.t_phase > 10.0:
                 self.abort_reason = "item not confirmed at grasp location"
@@ -107,7 +110,14 @@ class ContactGate:
                 self.abort_reason = "no stable grasp contact"
                 self._go(Phase.ABORT, x.t, self.abort_reason)
         elif self.phase == Phase.LIFT:
-            if (
+            if x.contact_force > c.f_grasp_max:
+                self.abort_reason = f"force spike {x.contact_force:.1f}N during lift"
+                self._go(Phase.ABORT, x.t, self.abort_reason)
+            elif not x.in_contact:
+                # the item slipped out of the gripper: never report a placement that did not happen
+                self.abort_reason = "item lost during lift"
+                self._go(Phase.ABORT, x.t, self.abort_reason)
+            elif (
                 x.expected_effort > 0
                 and abs(x.wrist_effort - x.expected_effort) > c.effort_tol_frac * x.expected_effort
             ):

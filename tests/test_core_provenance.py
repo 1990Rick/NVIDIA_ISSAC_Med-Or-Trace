@@ -136,3 +136,33 @@ def test_custody_chain_and_gaps():
     assert [c["verdict_id"] for c in hc["chain"]] == ["v1", "v3"]          # only VERIFIED links custody
     assert len(hc["gaps"]) == 1 and hc["gaps"][0]["gap_s"] == pytest.approx(190.0) and not hc["complete"]
     assert g.handoff_chain("nothing") == {"item": "nothing", "chain": [], "gaps": [], "complete": False}
+
+
+def test_explanations_custody_and_head_are_bound_to_the_chain():
+    """Relinking a verdict's evidence, forging custody or dropping the newest node all
+    break verify_chain, although no node payload was touched."""
+    from medortrace.provenance.graph import Edge, ProvenanceGraph, Verdict
+
+    def make():
+        g = ProvenanceGraph()
+        g.add_evidence("cam:1", 1.0, "camera", {"n": 1}, attributed_to="medortrace_robot_0")
+        g.add_evidence("cam:2", 2.0, "camera", {"n": 0})
+        g.add_verdict("verdict:c1", 3.0, {"item_id": "clamp_1", "slot_id": "mayo:top", "t_ref": 2.5},
+                      Verdict.VERIFIED, 0.95, "ok", [("cam:1", 1.2), ("cam:2", -0.3)])
+        return g
+
+    g = make()
+    assert g.verify_chain()
+    assert g.to_prov_json()["mot:head"] == g.head
+    g.edges = [e for e in g.edges if not (e.src == "verdict:c1" and e.dst == "cam:2")]        # hide contradiction
+    assert not g.verify_chain()
+    g = make()
+    g.edges = [Edge(e.src, e.dst, e.rel, 5.0) if e.dst == "cam:1" and e.src == "verdict:c1" else e for e in g.edges]
+    assert not g.verify_chain()                                                              # inflate support
+    g = make()
+    g.custody.setdefault("sponge_1", []).append({"t": 1.0, "slot": "field:top", "verdict_id": "verdict:c1"})
+    assert not g.verify_chain()                                                              # forged custody
+    g = make()
+    last = g.order.pop()
+    del g.nodes[last]
+    assert not g.verify_chain()                                   # truncated: the stored head no longer matches

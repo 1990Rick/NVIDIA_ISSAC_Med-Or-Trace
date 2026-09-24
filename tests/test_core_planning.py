@@ -74,10 +74,11 @@ def test_mpc_never_enters_keepout():
     traj, _ = _closed_loop(cm, [1.0, 2.0, 0.0], path, steps=250)
     assert not cm.lookup(traj[:, :2], "keepout").any()
     assert np.linalg.norm(traj[-1, :2] - path[-1]) < 0.2
-    # keep-out is enforced on the 0.1 m costmap grid: continuous intrusion into the 0.3 m
-    # margin is bounded by half a cell diagonal and the sterile zone itself is never touched
+    # keep-out is enforced on the 0.1 m costmap grid for the robot centre (margin + radius):
+    # the robot *body* never enters the 0.3 m AORN margin by more than half a cell diagonal
     assert not zone.box.contains_xy(traj[:, :2]).any()
-    assert np.max(zone.keepout_margin - zone.box.distance_xy(traj[:, :2])) < 0.5 * np.sqrt(2) * cm.grid.res
+    body_gap = zone.box.distance_xy(traj[:, :2]) - R_ROBOT
+    assert np.max(zone.keepout_margin - body_gap) < 0.5 * np.sqrt(2) * cm.grid.res
 
 
 def test_mpc_stops_when_a_human_blocks_the_corridor():
@@ -137,7 +138,8 @@ def test_costmap_layers():
     zone = SterileZone("field", _box((3.0, 2.0, 0.0), (0.5, 0.5, 0.0)), 0.3)
     cm = _costmap([_box((1.0, 1.0, 0.5), (0.3, 0.3, 0.5))], [zone])
     assert cm.lookup(np.array([[1.0, 1.0]]), "lethal")[0] and cm.lookup(np.array([[1.0, 1.0]]), "edt")[0] == 0
-    assert cm.lookup(np.array([[3.75, 2.0]]), "keepout")[0] and not cm.lookup(np.array([[3.9, 2.0]]), "keepout")[0]
+    # keep-out for the robot centre = zone + AORN margin + robot radius (0.5 + 0.3 + 0.28 = 1.08 m)
+    assert cm.lookup(np.array([[4.0, 2.0]]), "keepout")[0] and not cm.lookup(np.array([[4.15, 2.0]]), "keepout")[0]
     assert cm.lookup(np.array([[1.75, 1.0]]), "edt")[0] == pytest.approx(0.4, abs=0.11)
     assert cm.lookup(np.array([[-1.0, 1.0]]), "lethal")[0]      # outside the map is lethal
     assert cm.lookup(np.array([[-1.0, 1.0]]), "edt")[0] == 0.0

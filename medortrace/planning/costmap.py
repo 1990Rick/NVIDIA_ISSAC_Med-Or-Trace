@@ -36,7 +36,9 @@ class Costmap:
         keep = np.zeros(len(pts), dtype=bool)
         self.zone_dist = np.full(len(pts), np.inf)
         for z in zones:
-            keep |= z.box.contains_xy(pts, margin=z.keepout_margin + keepout_extra)
+            # the robot's *body* must stay keepout_margin (AORN 0.3 m) away from the sterile
+            # field, so its centre must stay margin + radius away
+            keep |= z.box.contains_xy(pts, margin=z.keepout_margin + robot_radius + keepout_extra)
             self.zone_dist = np.minimum(self.zone_dist, z.box.distance_xy(pts))
         self.keepout = keep.reshape(self.grid.shape)
         self.zone_dist = self.zone_dist.reshape(self.grid.shape)

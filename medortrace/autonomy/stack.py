@@ -154,6 +154,7 @@ class AutonomyStack:
         self.activity_prior = np.array([self._activity_prior(s) for s in inp.slots])
         self.activity = self.activity_prior.copy()
         self.activity_tau = float(a.get("activity_tau_s", 120.0))
+        self._last_cmd: tuple[float, float] | None = None
         # staff traffic map: time-averaged indicator "a tracked person within
         # TRAFFIC_RADIUS of this cell" (exponential window traffic_tau), used to keep
         # the robot's viewpoints out of walkways
@@ -237,7 +238,7 @@ class AutonomyStack:
         verdicts = []
         self.activity = self.activity_prior + (self.activity - self.activity_prior) * np.exp(-dt / self.activity_tau)
         # ---------------- localisation ------------------------------------
-        self.ekf.predict(b.odom, b.imu, dt)
+        self.ekf.predict(b.odom, b.imu, dt, cmd=self._last_cmd)
         if b.landmarks is not None:
             tl = self.sync.correct("landmarks", b.landmarks.header.stamp, b.landmarks.header.recv_stamp)
             if tl is not None:
@@ -336,6 +337,7 @@ class AutonomyStack:
             self.cm = Costmap(self.occ, self.inp.zones, self.radius, robot_height=self.height)
             self.cm_t = t
         cmd = self._plan_and_control(pose, people_xy, tracks, b, t, dt)
+        self._last_cmd = (float(cmd.v), float(cmd.omega))
         # ---------------- telemetry ------------------------------------------
         if self._seq % 10 == 0:
             self.belief_history.append(self.items.matrix().astype(np.float32))

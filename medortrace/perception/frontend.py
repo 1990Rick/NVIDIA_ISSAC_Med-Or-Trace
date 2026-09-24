@@ -94,10 +94,16 @@ class LidarFrontEnd:
             h = cast(self.scene, np.repeat(origin[None], n, 0), dirs, t_max=25.0)
             behind = np.isfinite(h.t) & (rng > h.t + 0.3) & (h.obj >= 0)
             oi = np.where(h.obj >= 0, h.obj, 0)
-            p_spec = np.clip(self.spec[oi] * 1.1, 0, 0.95)
-            p = np.where(self.is_wall[oi], 0.95, np.maximum(p_spec, 0.5 * (1 - self.trans[oi])))
+            # A return from behind a surveyed surface is either multipath via that surface
+            # (needs a mirror-like surface: probability grows with its specularity) or a
+            # map error (the object moved / is gone).  Behind a wall it can only be a ghost;
+            # behind a matte opaque object it is mostly a map error (low ghost score, so the
+            # point counts as residual evidence and the ray carves through the stale cells).
+            p_spec = np.clip(self.spec[oi] * 1.2, 0, 0.95)
+            p = np.where(self.is_wall[oi], 0.95, np.maximum(p_spec, 0.15 * (1 - self.trans[oi])))
             ghost = np.where(behind, p, 0.0)
-            carve = np.where(behind, h.t, rng)
+            # suspected multipath: carve free space only up to the mirror surface
+            carve = np.where(behind & (ghost >= 0.5), h.t, rng)
             # floor mirror (wet floor): points below the floor plane
             below = pts[:, 2] < -0.05
             ghost = np.where(below, 0.95, ghost)

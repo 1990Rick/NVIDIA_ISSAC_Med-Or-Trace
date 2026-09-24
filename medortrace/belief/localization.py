@@ -36,19 +36,29 @@ class EkfLocalizer:
         self.last_update_t = 0.0
         self.innov_hist: deque = deque(maxlen=60)   # (landmark_id, innovation) for drift diagnosis
 
-    def predict(self, odom: WheelOdometry | None, imu: list[ImuSample], dt: float) -> None:
-        v = odom.v if odom is not None else 0.0
-        w = odom.omega if odom is not None else 0.0
-        q_scale = 1.0 if odom is not None else 6.0      # odometry dropout -> inflate process noise
+    def predict(self, odom: WheelOdometry | None, imu: list[ImuSample], dt: float,
+                cmd: tuple[float, float] | None = None) -> None:
+        """Odometry (+gyro) motion model.  During an odometry dropout the last commanded
+        velocity ``cmd`` is the motion prior (the robot keeps being driven), with process
+        noise that covers a command the base did not follow (slip, blocked wheels,
+        acceleration limits) - assuming standstill would make the filter confidently
+        wrong and the landmark gate would then reject the corrections."""
+        if odom is not None:
+            v, w, q_v, q_w = odom.v, odom.omega, self.q_v, self.q_w
+        else:
+            v, w = (cmd if cmd is not None else (0.0, 0.0))
+            q_v, q_w = self.q_v * 6.0 + 0.3 * abs(v), self.q_w * 6.0 + 0.3 * abs(w)
         if imu:
             gz = float(np.mean([s.ang_vel[2] for s in imu]))
             w = 0.5 * w + 0.5 * gz if odom is not None else gz
+            if odom is None:
+                q_w = self.q_w * 2.0                     # the gyro still measures the turn rate
         th = self.x[2]
         self.x = self.x + np.array([v * dt * np.cos(th), v * dt * np.sin(th), w * dt])
         self.x[2] = wrap_angle(self.x[2])
         F = np.array([[1, 0, -v * dt * np.sin(th)], [0, 1, v * dt * np.cos(th)], [0, 0, 1]])
         G = np.array([[dt * np.cos(th), 0], [dt * np.sin(th), 0], [0, dt]])
-        Q = np.diag([(self.q_v * q_scale + 0.05 * abs(v)) ** 2, (self.q_w * q_scale + 0.05 * abs(w)) ** 2])
+        Q = np.diag([(q_v + 0.05 * abs(v)) ** 2, (q_w + 0.05 * abs(w)) ** 2])
         self.P = F @ self.P @ F.T + G @ Q @ G.T + np.diag([1e-6, 1e-6, 1e-7])
 
     def update_landmarks(self, frame: LandmarkFrame, t: float) -> None:

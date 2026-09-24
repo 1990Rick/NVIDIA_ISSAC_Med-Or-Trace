@@ -100,6 +100,12 @@ class ProvenanceGraph:
         self.edges.append(Edge(src, dst, rel, float(weight)))
 
     def verify_chain(self) -> bool:
+        """Re-hash every node in order, then check that the *derived* structures are
+        the ones the hashed nodes commit to: each verdict's explanation edges equal
+        the evidence list (ids, weights, evidence hashes) in its hashed attributes,
+        each evidence node is attributed to the agent named in its attributes, and
+        the custody index is exactly the VERIFIED verdicts.  (Tail truncation is only
+        detectable against an externally anchored head - see ``to_prov_json``.)"""
         prev = "GENESIS"
         for nid in self.order:
             n = self.nodes[nid]
@@ -108,12 +114,38 @@ class ProvenanceGraph:
             if n.prev_hash != prev or hashlib.sha256(payload.encode()).hexdigest() != n.hash:
                 return False
             prev = n.hash
-        return True
+        if prev != self.head:
+            return False
+        derived = {}
+        attributed = {}
+        for e in self.edges:
+            if e.rel in ("wasDerivedFrom", "contradicts"):
+                derived.setdefault(e.src, []).append((e.dst, round(e.weight, 6)))
+            elif e.rel == "wasAttributedTo":
+                attributed.setdefault(e.src, set()).add(e.dst)
+        custody: dict[str, list] = {}
+        for nid in self.order:
+            n = self.nodes[nid]
+            if n.kind == "verdict" and "evidence" in n.attrs:
+                want = sorted((ev["id"], round(float(ev["w"]), 6)) for ev in n.attrs["evidence"])
+                if sorted(derived.get(nid, [])) != want:
+                    return False
+                if any(ev["id"] not in self.nodes or self.nodes[ev["id"]].hash != ev["hash"]
+                       for ev in n.attrs["evidence"]):
+                    return False
+                c = n.attrs.get("claim", {})
+                if n.attrs.get("verdict") == Verdict.VERIFIED.value and c.get("item_id"):
+                    custody.setdefault(c["item_id"], []).append(
+                        {"t": c.get("t_ref", n.t), "slot": c.get("slot_id"), "verdict_id": nid})
+            if n.kind == "evidence" and "attributed_to" in n.attrs:
+                if "agent:" + str(n.attrs["attributed_to"]) not in attributed.get(nid, set()):
+                    return False
+        return _canon(custody) == _canon(self.custody)
 
     # ------------------------------------------------------------------
     def add_evidence(self, eid: str, t: float, sensor: str, summary: dict, pose: np.ndarray | None = None,
                      attributed_to: str | None = None) -> None:
-        attrs = {"sensor": sensor, **summary}
+        attrs = {"sensor": sensor, **summary, "attributed_to": attributed_to or self.robot_id}
         if pose is not None:
             attrs["robot_pose_est"] = pose
         digest = hashlib.sha256(json.dumps(_canon(attrs), sort_keys=True).encode()).hexdigest()[:16]
@@ -123,11 +155,14 @@ class ProvenanceGraph:
 
     def add_verdict(self, vid: str, t: float, claim: dict, verdict: Verdict, posterior: float, reason: str,
                     contributions: list[tuple[str, float]]) -> None:
+        # the explanation (which evidence supported / contradicted the verdict, and the
+        # hashes of those evidence nodes) is part of the hashed verdict node
+        ev = [{"id": eid, "w": round(float(w), 6), "hash": self.nodes[eid].hash}
+              for eid, w in contributions if eid in self.nodes]
         self.add(vid, "verdict", t, {"claim": claim, "verdict": verdict.value, "posterior": posterior,
-                                     "reason": reason})
-        for eid, w in contributions:
-            if eid in self.nodes:
-                self.link(vid, eid, "wasDerivedFrom" if w >= 0 else "contradicts", w)
+                                     "reason": reason, "evidence": ev})
+        for e in ev:
+            self.link(vid, e["id"], "wasDerivedFrom" if e["w"] >= 0 else "contradicts", e["w"])
         self.link(vid, "agent:" + self.robot_id, "wasAttributedTo")
         item = claim.get("item_id")
         if item and verdict == Verdict.VERIFIED:
@@ -171,4 +206,4 @@ class ProvenanceGraph:
             else:
                 rels[key][f"_:c{i}"] = {"mot:verdict": e.src, "mot:evidence": e.dst, "mot:weight": e.weight}
         return {"prefix": {"mot": "https://medortrace.example/ns#"}, "entity": ent, "activity": act,
-                "agent": ag, **rels}
+                "agent": ag, **rels, "mot:head": self.head, "mot:n_nodes": len(self.order)}
