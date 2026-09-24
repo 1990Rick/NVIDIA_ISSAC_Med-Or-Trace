@@ -95,22 +95,31 @@ class ItemBelief:
             b[self.sidx[s0]] = 1.0
             self.items[it.id] = ItemBeliefState(it, b / b.sum())
         # neighbourhood structure for leak: floor zones near each surface
-        pos = np.array([s.position[:2] if np.all(np.isfinite(s.position[:2])) else [1e3, 1e3] for s in slots])
         self.floor_idx = [i for i, s in enumerate(slots) if s.kind == "floor"]
         self.hand_idx = [i for i, s in enumerate(slots) if s.kind == "hand"]
         self.else_idx = self.sidx.get("elsewhere")
-        self.dist = np.linalg.norm(pos[:, None] - pos[None], axis=2)
+        self.dist = self._slot_distances(slots)
         self.records: list[EvidenceRecord] = []
         self.records_base = 0          # absolute index of records[0] (older records were trimmed)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _slot_distances(slots: list[Slot]) -> np.ndarray:
+        """Pairwise planar slot distances; a slot without a known position (an
+        untracked hand, "elsewhere") is infinitely far from every other slot, so
+        no leak links two untracked people's hands."""
+        pos = np.array([s.position[:2] if np.all(np.isfinite(s.position[:2])) else [np.nan, np.nan] for s in slots])
+        d = np.linalg.norm(pos[:, None] - pos[None], axis=2)
+        d[~np.isfinite(d)] = np.inf
+        np.fill_diagonal(d, 0.0)
+        return d
+
     def update_hand_positions(self, hand_xy: dict[str, np.ndarray]) -> None:
         for name, xy in hand_xy.items():
             k = self.sidx.get(f"hand:{name}")
             if k is not None:
                 self.slots[k].position = np.array([xy[0], xy[1], 1.0])
-        pos = np.array([s.position[:2] if np.all(np.isfinite(s.position[:2])) else [1e3, 1e3] for s in self.slots])
-        self.dist = np.linalg.norm(pos[:, None] - pos[None], axis=2)
+        self.dist = self._slot_distances(self.slots)
 
     def predict(self, dt: float) -> None:
         if not self.use_temporal:
@@ -191,8 +200,9 @@ class ItemBelief:
             # false positives: clutter + confusion-induced soft detections from
             # items of *other* classes (Poisson)
             lam_fp = self.fp + sum(self.confusion[ci[o], c] * exp_det[o] for o in by_class if o != cls)
-            # per-item probability of being detected *given* presence at a slot
-            pd = np.array([vp * (1 - 0.45 * (glare_expect or {}).get(j, 0.0)) * self.q_vis * self.confusion[c, c]
+            # per-item probability of being detected *given* presence at a slot and
+            # given that the slot really is visible as predicted
+            pd = np.array([vp * (1 - 0.45 * (glare_expect or {}).get(j, 0.0)) * self.confusion[c, c]
                            for j in iids])                                        # (m, S)
             B = np.array([self.items[j].b for j in iids])                        # (m, S)
             # exact count likelihood under the mean-field factorisation: every
@@ -205,8 +215,13 @@ class ItemBelief:
                 q_other = np.delete(B * pd, m_i, axis=0).T                        # (S, m-1)
                 P_wo = _poisson_binomial(q_other)                                 # (S, m)
                 P_w = _poisson_binomial(np.c_[q_other, pd[m_i]])                  # (S, m+1)
-                lik_w = _count_likelihood(P_w, lam_fp, n)
-                lik_wo = _count_likelihood(P_wo, lam_fp, n)
+                # visibility mixture: with prob. q_vis the prediction holds (item model);
+                # otherwise the slot is hidden from this view for *all* items at once
+                # (only false positives) - identical under both hypotheses, so it bounds
+                # the evidence a frame with an unmodelled occluder can contribute
+                lik_hidden = _count_likelihood(np.ones((self.n, 1)), lam_fp, n)
+                lik_w = self.q_vis * _count_likelihood(P_w, lam_fp, n) + (1 - self.q_vis) * lik_hidden
+                lik_wo = self.q_vis * _count_likelihood(P_wo, lam_fp, n) + (1 - self.q_vis) * lik_hidden
                 llr = np.where(vis, np.log(lik_w + 1e-300) - np.log(lik_wo + 1e-300), 0.0)
                 llr = np.clip(llr, -6.0, 6.0)
                 self._apply(self.items[iid], llr, evidence_id, t, "camera", vis)

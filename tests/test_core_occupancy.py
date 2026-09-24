@@ -72,11 +72,28 @@ def test_no_return_rays_carve_up_to_carve_max():
 
 def test_floor_returns_are_not_occupied():
     occ = _occ()
-    floor_hit = np.array([2.55, 2.05, 0.03])
+    floor_hit = np.array([2.55, 2.05, 0.01])                 # floor returns scatter by millimetres
     _scan(occ, ORIGIN, floor_hit)
     assert occ.static[_vox(floor_hit)] <= 0
     assert (occ.static < 0).sum() > 5                      # but the ray still carved free space
     assert occ.column_occupancy()[_vox(floor_hit)[:2]] <= 0.5
+
+
+def test_low_obstacle_returns_are_occupied_and_lethal():
+    """A fallen IV pole (6 cm tall) returns points above the floor band: they are
+    occupied in the lowest voxel layer, which the costmap includes (column from 0 m)."""
+    from medortrace.planning.costmap import Costmap
+    occ = _occ()
+    occ.set_prior_from_boxes([])
+    pole = np.array([2.55, 2.05, 0.05])
+    for _ in range(4):
+        _scan(occ, ORIGIN, pole)
+    k = _vox(pole)
+    assert k[2] == 0 and occ.static[k] > 0
+    assert occ.column_occupancy(0.0, 1.5)[k[:2]] > 0.65      # seen from the floor up ...
+    assert occ.column_occupancy(0.1, 1.5)[k[:2]] < 0.5       # ... invisible to a 10 cm band
+    cm = Costmap(occ, [], robot_radius=0.28)
+    assert cm.lookup(pole[None, :2], "lethal")[0]
 
 
 def test_ghost_points_go_to_ambiguous_layer_and_carve_only_to_mirror():

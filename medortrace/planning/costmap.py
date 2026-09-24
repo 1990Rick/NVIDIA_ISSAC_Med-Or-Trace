@@ -23,7 +23,8 @@ class Costmap:
                  occ_thresh: float = 0.65, unknown_cost: float = 0.6, ambiguous_cost: float = 2.0,
                  keepout_extra: float = 0.0, robot_height: float = 1.55):
         self.grid: GridSpec = occ.grid2d
-        col = occ.column_occupancy(0.1, robot_height)
+        # from the floor up: low obstacles (a fallen IV pole) are lethal for the base
+        col = occ.column_occupancy(0.0, robot_height)
         core = col > occ_thresh
         # room boundary
         core[0, :] = core[-1, :] = core[:, 0] = core[:, -1] = True

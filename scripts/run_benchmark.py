@@ -31,6 +31,8 @@ ap.add_argument("--workers", type=int, default=None)
 ap.add_argument("--backend", default="lite", choices=["lite", "isaac"])
 ap.add_argument("--export", action="store_true", help="write per-episode trajectory datasets")
 ap.add_argument("--save-raw", action="store_true")
+ap.add_argument("--nbv-variant", action="append", default=[], metavar="NAME=POLICY_YAML",
+                help="also run the active policy with these NBV weights (e.g. trained=policies/nbv_trained.yaml)")
 ap.add_argument("--out", default="runs/benchmark")
 a = ap.parse_args()
 
@@ -54,13 +56,23 @@ print(f"{len(sel)} scenarios x {len(a.policies)} policies")
 run_batch(sel, a.policies, workers=a.workers, out_jsonl=out / "results.jsonl",
           export_dir=str(out / "episodes") if a.export else None, duration=a.duration, backend=a.backend,
           save_raw=a.save_raw)
+if a.nbv_variant:
+    nv = dict(v.split("=", 1) for v in a.nbv_variant)
+    print(f"active with NBV variants {sorted(nv)}")
+    run_batch(sel, ("active",), {k: {"autonomy": {"nbv_weights": p}} for k, p in nv.items()}, workers=a.workers,
+              out_jsonl=out / "results.jsonl", duration=a.duration, backend=a.backend)
 rows = [r for r in load_results(out / "results.jsonl") if not r.get("error")]
+# active under an NBV variant is reported as its own "policy" (e.g. active:trained)
+for r in rows:
+    if r["policy"] == "active" and r.get("variant") not in (None, "", "full", "nominal"):
+        r["policy"] = f"active:{r['variant']}"
+policies = list(a.policies) + [f"active:{k}" for k in (dict(v.split("=", 1) for v in a.nbv_variant))]
 summ = summarize(rows)
 (out / "summary.json").write_text(json.dumps(summ, indent=1))
 md = ["# MED-OR-TRACE benchmark summary", "", "## Primary metrics", markdown_table(summ, PRIMARY), "",
       "## Secondary metrics", markdown_table(summ, SECONDARY), "", "## Safety counters", markdown_table(summ, SAFETY)]
-for base in [p for p in a.policies if p != "active"]:
-    if "active" in a.policies:
+for base in [p for p in policies if p != "active"]:
+    if "active" in policies:
         d = paired_delta(rows, "active", base)
         md += [
             "",

@@ -314,15 +314,7 @@ class AutonomyStack:
             self._on_workflow(ev, t)
         for due, ev in list(self.pending_counts):
             if t >= due:
-                moves = [e for e in self.log_seen if e.type != WorkflowEventType.COUNT]
-                for c in count_claims(ev, moves, self.inp.initial_placement, self.inp.duration,
-                                      self.inp.count_grace):
-                    self.verifier.add_claim(c)
-                    # a move of this item reported after the count time but before the
-                    # claim existed: the counted state no longer holds and the robot
-                    # could not snapshot it -> the claim is closed as superseded
-                    if any(e.item_id == c.item_id and e.t > ev.t for e in moves):
-                        self.verifier.supersede(c.id)
+                self._add_count_claims(ev)
                 self.pending_counts.remove((due, ev))
         # ---------------- camera -------------------------------------------
         loc_ok = self.ekf.pos_std < 0.3
@@ -742,8 +734,23 @@ class AutonomyStack:
             attributed_to="operator",
         )
 
+    def _add_count_claims(self, ev) -> None:
+        moves = [e for e in self.log_seen if e.type != WorkflowEventType.COUNT]
+        for c in count_claims(ev, moves, self.inp.initial_placement, self.inp.duration, self.inp.count_grace):
+            self.verifier.add_claim(c)
+            # a move of this item reported after the count time but before the claim
+            # existed: the counted state no longer holds and the robot could not
+            # snapshot it -> the claim is closed as superseded
+            if any(e.item_id == c.item_id and e.t > ev.t for e in moves):
+                self.verifier.supersede(c.id)
+
     def finalize(self, t: float) -> list:
-        """Close all open claims at episode end (ABSTAIN for anything undecided)."""
+        """Close all open claims at episode end (ABSTAIN for anything undecided).
+        Counts still waiting for their claims (logged in the last seconds) are turned
+        into claims first, so the claim set matches ``claims_from_log``."""
+        for due, ev in list(self.pending_counts):
+            self._add_count_claims(ev)
+            self.pending_counts.remove((due, ev))
         out = []
         for oc in list(self.verifier.open.values()):
             oc.claim.t_due = min(oc.claim.t_due, t)

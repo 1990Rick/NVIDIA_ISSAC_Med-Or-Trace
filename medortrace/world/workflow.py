@@ -248,6 +248,8 @@ def handoff_claim(ev: WorkflowEvent, T: float, grace: float) -> Claim | None:
         if ev.dst.startswith("hand:"):
             return None  # custody in hands is transient; verified via the next placement
         t_ref = ev.t + 6.0
+        if t_ref >= T:
+            return None       # reported too late to be checked within the case
         return Claim(f"c_{ev.event_id}", t_ref, min(T, t_ref + grace), ev.item_id, ev.dst,
                      source_event=ev.event_id, kind="handoff")
     return None

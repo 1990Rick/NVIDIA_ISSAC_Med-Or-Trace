@@ -33,6 +33,7 @@ def binary_entropy(p):
 
 
 class OccupancyBelief:
+    FLOOR_Z = 0.03
     L_OCC = 0.85
     L_FREE = -0.4
     L_MIN, L_MAX = -4.0, 4.0
@@ -112,7 +113,10 @@ class OccupancyBelief:
         n_end = len(endpoints)
         if n_end:
             ijk, ok = self._idx(endpoints)
-            floor = endpoints[:, 2] < 0.08          # floor returns are free-space evidence only
+            # floor returns are free-space evidence only; at the lidar's grazing angles
+            # floor points scatter by millimetres, so 3 cm keeps low obstacles (a fallen
+            # IV pole is 6 cm tall) out of the floor class
+            floor = endpoints[:, 2] < self.FLOOR_Z
             st = ok & ~dynamic_mask & ~floor
             w = hit_weight[st]
             np.add.at(self.static, (ijk[st, 0], ijk[st, 1], ijk[st, 2]), (self.L_OCC * w).astype(np.float32))
@@ -140,8 +144,10 @@ class OccupancyBelief:
         return p
 
     def column_occupancy(self, z_lo: float = 0.1, z_hi: float = 1.6) -> np.ndarray:
-        # the lowest voxel layer contains the floor and is excluded
-        k0, k1 = max(1, int(np.ceil(z_lo / self.res - 1e-9))), int(np.ceil(z_hi / self.res))
+        """Max occupancy over the voxel layers covering [z_lo, z_hi).  The lowest layer
+        (0-res) is included only when z_lo < res: floor returns never mark it occupied
+        (FLOOR_Z), so there it holds genuine low obstacles only."""
+        k0, k1 = max(0, int(np.floor(z_lo / self.res + 1e-9))), int(np.ceil(z_hi / self.res))
         return self.prob()[:, :, k0:k1].max(axis=2)
 
     def uncertainty_field(self, z_lo: float = 0.1, z_hi: float = 1.6) -> np.ndarray:

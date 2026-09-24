@@ -127,3 +127,28 @@ def test_disabled_supervisor_and_envelope_overrides():
     assert env.t_hold == 0.5 and env.loc_std_hard == 0.6 and not hasattr(env, "unknown_key")
     sup = SafetySupervisor(env)
     assert sup.update(SafetyInputs(0.0, **LOC_LOST)) == Mode.CAUTION     # 0.5 m is now only a soft violation
+
+
+def test_retreat_persists_while_the_hazard_persists():
+    """A person keeps crowding the robot: STOP -> RETREAT after t_retreat_after, then
+    RETREAT holds (no RETREAT <-> STOP oscillation) until the hand-over timeout."""
+    env = Envelope()
+    sup = SafetySupervisor(env)
+    modes = []
+    t = 0.0
+    while t < env.t_handover_after + 2.0:
+        modes.append(sup.update(SafetyInputs(t, human_clearance=0.3)))
+        t += 0.1
+    first_retreat = modes.index(Mode.RETREAT)
+    first_handover = modes.index(Mode.HANDOVER)
+    assert all(m == Mode.RETREAT for m in modes[first_retreat:first_handover])
+    assert abs(first_retreat * 0.1 - env.t_retreat_after) < 0.25
+    # once clear for t_hold, it steps down (RETREAT -> CAUTION)
+    sup = SafetySupervisor(env)
+    for k in range(int(env.t_retreat_after / 0.1) + 5):
+        sup.update(SafetyInputs(k * 0.1, human_clearance=0.3))
+    assert sup.mode == Mode.RETREAT
+    t0 = env.t_retreat_after + 0.5
+    for k in range(int((env.t_hold + 0.5) / 0.1)):
+        sup.update(SafetyInputs(t0 + k * 0.1, human_clearance=3.0))
+    assert sup.mode == Mode.CAUTION

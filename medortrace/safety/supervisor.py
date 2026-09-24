@@ -175,6 +175,15 @@ class SafetySupervisor:
             self._since_clear = None
             if want in (Mode.STOP, Mode.RETREAT):
                 self._stop_started = x.t
+        elif self.mode == Mode.RETREAT and want == Mode.STOP and cat in ("human_proximity", "collision_risk"):
+            # keep retreating while the hazard that caused the retreat persists (stepping
+            # down to STOP would only re-arm the retreat timer: STOP <-> RETREAT oscillation)
+            self._since_clear = None
+            dur = x.t - (self._stop_started if self._stop_started is not None else x.t)
+            if dur > e.t_handover_after:
+                new = Mode.HANDOVER
+                self.handover_requests += 1
+                reasons = reasons + ["persisting stop -> operator"]
         else:
             # de-escalate only after the condition has been clear for t_hold
             if SEVERITY[want] < SEVERITY[self.mode]:

@@ -174,7 +174,8 @@ class LiteBackend(SimBackend):
         self.contact_force = 0.0
         for o in self.static_objs:
             # overhead structure above the mast height does not collide
-            if o.box.z_min > rp.height or o.box.z_max < 0.02:
+            # drivable: fabric lying on the floor (<= 2.5 cm); overhead above the mast
+            if o.box.z_min > rp.height or o.box.z_max <= 0.025:
                 continue
             if o.box.distance_xy(new_pose[None, :2])[0] < rp.radius:
                 self.collision_static = True

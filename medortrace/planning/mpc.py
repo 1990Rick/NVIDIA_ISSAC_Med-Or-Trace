@@ -128,19 +128,8 @@ class MppiController:
         coll_frac = np.zeros(K)
         cvar = np.zeros(K)
         if human_samples.size:
-            T, M = human_samples.shape[:2]
-            hs = human_samples[:, :, :H]                                         # T,M,H,2
-            dd = np.linalg.norm(xy[:, None, None, :, :] - hs[None], axis=4)      # K,T,M,H
-            c = dd - robot_radius - self.r_h
-            per = np.exp(-np.clip(c, 0, None) / 0.35).sum(axis=3) + 50.0 * (c < 0.1).sum(axis=3)   # K,T,M
-            per = per.sum(axis=1)                                                # K,M
-            q = np.quantile(per, self.alpha, axis=1)
-            tail = np.where(per >= q[:, None], per, np.nan)
-            cvar = np.nanmean(tail, axis=1)
+            min_clear, coll_frac, cvar = self._human_risk(xy, human_samples, robot_radius)
             cost += self.w["risk"] * cvar / H
-            cm_ = c.min(axis=(1, 3))                                             # K,M
-            min_clear = np.median(cm_, axis=1)
-            coll_frac = (cm_ < 0.0).mean(axis=1)
         # --- control effort / smoothness (energy proxy) ------------------
         cost += self.w["ctrl"] * (U[:, :, 0] ** 2 + 0.3 * U[:, :, 1] ** 2).mean(axis=1)
         cost += self.w["smooth"] * (np.diff(U, axis=1) ** 2).sum(axis=(1, 2))
@@ -164,10 +153,26 @@ class MppiController:
             U_new = np.zeros_like(U_new)
             Xn = self.rollout(x0, U_new[None])
         self.U = np.vstack([U_new[1:], U_new[-1:]])
+        # risk diagnostics of the sequence that is actually executed (the weighted
+        # average, or the fallback), not of the best sample - the supervisor gates on them
+        mc, cf, cv = self._human_risk(Xn[:, :, :2], human_samples, robot_radius)
         return MpcResult(float(U_new[0, 0]), float(U_new[0, 1]),
-                         float(min_clear[best]) if np.isfinite(min_clear[best]) else 10.0,
-                         float(coll_frac[best]), float(cvar[best]) if human_samples.size else 0.0,
+                         float(mc[0]) if np.isfinite(mc[0]) else 10.0, float(cf[0]), float(cv[0]),
                          feasible, Xn[0])
+
+    def _human_risk(self, xy: np.ndarray, human_samples: np.ndarray, robot_radius: float):
+        """(median min clearance, collision fraction, CVaR) over sampled human futures
+        for rollouts ``xy`` (K,H,2)."""
+        K, H = xy.shape[:2]
+        if not human_samples.size:
+            return np.full(K, np.inf), np.zeros(K), np.zeros(K)
+        hs = human_samples[:, :, :H]                                         # T,M,H,2
+        c = np.linalg.norm(xy[:, None, None, :, :] - hs[None], axis=4) - robot_radius - self.r_h   # K,T,M,H
+        per = (np.exp(-np.clip(c, 0, None) / 0.35).sum(axis=3) + 50.0 * (c < 0.1).sum(axis=3)).sum(axis=1)
+        q = np.quantile(per, self.alpha, axis=1)
+        cvar = np.nanmean(np.where(per >= q[:, None], per, np.nan), axis=1)
+        cm_ = c.min(axis=(1, 3))                                             # K,M
+        return np.median(cm_, axis=1), (cm_ < 0.0).mean(axis=1), cvar
 
     @staticmethod
     def _interp_matrix(H: int, n_knots: int) -> np.ndarray:

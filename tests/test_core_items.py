@@ -118,11 +118,14 @@ def test_camera_positive_and_negative_evidence():
 
 def test_fungible_mean_field_counts():
     """Two sponges are known to be on the table; a third is uncertain (table vs bin).
-    Every item is detected at most once (Poisson-binomial count model), so:
-    seeing 1 sponge is evidence against the third being there; seeing 2 is nearly
-    uninformative at pd = 0.64 (P(2 of 3) = 0.44 vs P(2 of 2) = 0.41); seeing 3 is a
-    surplus the two known sponges cannot explain - as informative as a lone
-    detection of a non-fungible item."""
+    Every item is detected at most once (Poisson-binomial count model) and the
+    slot's predicted visibility holds with probability q_vis (otherwise it is hidden
+    for all items at once), so:
+    seeing 1 or 2 sponges is evidence against the third (1 stronger than 2);
+    seeing none is nearly uninformative - the two known sponges were not seen
+    either, so the slot was most likely hidden from this view;
+    seeing 3 is a surplus the two known sponges cannot explain - as informative as
+    a lone detection of a non-fungible item."""
     def fresh():
         bel = _belief(_sponges(3))
         bel.apply_workflow_event("sponge_2", "table:top", "bin:inside", 0.59, "wf", 0.0)
@@ -130,12 +133,13 @@ def test_fungible_mean_field_counts():
 
     p0 = fresh().prob("sponge_2", "table:top")
     assert 0.4 < p0 < 0.6
-    low, mid, high = fresh(), fresh(), fresh()
+    zero, low, mid, high = fresh(), fresh(), fresh(), fresh()
+    _cam(zero, "sponge", "table:top", pd=0.8, count=0.0)
     _cam(low, "sponge", "table:top", pd=0.8, count=1.0)
     _cam(mid, "sponge", "table:top", pd=0.8, count=2.0)
     _cam(high, "sponge", "table:top", pd=0.8, count=3.0)
-    assert low.prob("sponge_2", "table:top") < p0 - 0.03
-    assert mid.prob("sponge_2", "table:top") == pytest.approx(p0, abs=0.02)
+    assert low.prob("sponge_2", "table:top") < mid.prob("sponge_2", "table:top") < p0 - 0.02
+    assert zero.prob("sponge_2", "table:top") == pytest.approx(p0, abs=0.02)
     assert high.prob("sponge_2", "table:top") > p0
     # lone non-fungible item with the same belief and a single detection
     lone = _belief()
