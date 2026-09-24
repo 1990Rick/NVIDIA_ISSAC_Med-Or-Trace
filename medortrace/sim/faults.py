@@ -93,9 +93,12 @@ def sample_faults(cfg: dict, duration: float, rng: np.random.Generator, hidden_c
             fm.map_edits.append({"kind": "drop", "n": int(mc["drop_n"])})
     # --- CF-D hidden cause --------------------------------------------------
     if hidden_cause.get("factor") == "CF-D":
+        # Both arms: the fiducial camera is blinded for a long window (e.g. a
+        # boom light pointed at it), so localisation relies on odometry+lidar.
+        fm.dropouts["landmarks"] = sorted(fm.dropouts.get("landmarks", []) + [(20.0, 110.0)])
         if hidden_cause.get("value") == "loc_drift":
-            fm.odom_bias = (0.06, 0.02)
-            fm.odom_bias_start = 5.0
+            fm.odom_bias = (0.08, 0.03)
+            fm.odom_bias_start = 20.0
         else:
             fm.map_edits.append({"kind": "cf_d_cart_moved", "object": "cart_1", "shift": [0.55, -0.35]})
     fm.labels = {

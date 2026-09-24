@@ -198,6 +198,19 @@ def hidden_cause_outcome(ep, vt, stack, truth) -> dict:
         dmin = float(np.min(np.linalg.norm(R[:, :2] - ap, axis=1)))
         out["cfb_min_dist_to_aisle_point"] = dmin
         out["cfb_traversed"] = float(dmin < 0.35)
+        # defensible estimate of the hidden condition: final belief at the point
+        occ = stack.occ
+        c = occ.grid2d.world_to_cell(ap[None])[0]
+        sl = (slice(max(0, c[0] - 1), c[0] + 2), slice(max(0, c[1] - 1), c[1] + 2))
+        p_occ = float(occ.column_occupancy(0.1, 1.5)[sl].max())
+        amb = float(np.clip(occ.ambiguous[sl], 0, 1).max())
+        out["cfb_belief_occupied"] = p_occ
+        out["cfb_belief_ambiguous"] = amb
+        if val == "real_obstacle":
+            out["cfb_correct"] = float(p_occ > 0.5)
+        else:
+            out["cfb_correct"] = float(p_occ < 0.5)
+        out["cfb_collision"] = float(any(truth.collision_static))
     elif fac == "CF-C":
         rel = [(v, c, y) for v, c, y, f in vt if c.item_id == "clamp_1"]
         out["cfc_clamp_refuted"] = float(any(v.verdict.value == "REFUTED" for v, c, y in rel))

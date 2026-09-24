@@ -99,7 +99,9 @@ class NextBestView:
         cands = []
         for k in targets:
             s = slots[k]
-            rmin, rmax = (0.45, 1.05) if s.needs_top_view else (0.9, 2.4)
+            # open containers: the camera (h=1.45 m, pitch -25 deg, vfov 65 deg) must look
+            # down steeper than 38 deg but stay inside the frustum -> ~0.75-1.4 m standoff
+            rmin, rmax = (0.75, 1.4) if s.needs_top_view else (0.9, 2.4)
             if s.hidden_from_camera:
                 rmin, rmax = (0.9, 3.0)
             for _ in range(self.n_t):

@@ -128,6 +128,7 @@ class AutonomyStack:
         self.sterile_staff = {s.name for s in inp.staff if s.sterile}
         self.tracker.sterile_names = self.sterile_staff
         self.dwell_s = float(a.get("viewpoint_dwell_s", 2.0))
+        self.use_scan_matching = a.get("use_scan_matching", True)
         self._arrived_t = None
         self.items = ItemBelief(inp.items, inp.slots, inp.initial_placement,
                                 params={**cfg.get("belief", {}), "use_temporal_model": a.get("use_temporal_model", True),
@@ -204,11 +205,17 @@ class AutonomyStack:
                 self.occ.integrate_scan(lp.origin, lp.points, w, lp.ghost_prob, dyn, lp.free_dirs[::3],
                                         carve_limit=lp.carve_limit)
                 self.last_lidar_t = t
-                res = lp.points[lp.residual & ~dyn & (lp.cluster_labels < 0)]
-                n_static = int((~dyn).sum())
-                dg = self.diag.observe(t, res, n_static, self.ekf.nis_avg)
-                if dg is not None:
-                    self._act_on_diagnosis(dg)
+                self._lidar_frames = getattr(self, "_lidar_frames", 0) + 1
+                if self._lidar_frames % 2 == 0:   # 2.5 Hz scan-to-map consistency check
+                    static = ~dyn & (lp.ghost_prob < 0.5)
+                    dg = self.diag.observe(t, lp.points[static], lp.residual[static], p_meas,
+                                           self.lidar_fe.map_edt, self.lidar_fe.g, self.ekf.nis_avg, self.rng)
+                    if dg is not None:
+                        self._act_on_diagnosis(dg)
+                    corr = self.diag.pose_correction(pose)
+                    recent_change = any(d.cause == "map_change" and t - d.t < 10 for d in self.diag.diagnoses)
+                    if corr is not None and self.use_scan_matching and not recent_change:
+                        self.ekf.update_pose(corr, np.diag([0.06, 0.06, 0.025]) ** 2)
                 if lp.gt_ghost is not None:
                     pred = lp.ghost_prob > 0.5
                     g = lp.gt_ghost.astype(bool)
@@ -456,9 +463,10 @@ class AutonomyStack:
                 self.prov.add_evidence(f"diag:{len(self.diag.diagnoses)}", dg.t, "world_model",
                                        {"cause": "map_change", "object": dg.object, "p": dg.prob})
         elif dg.cause == "loc_drift":
-            # admit that we are lost: inflate covariance so landmarks re-anchor us
-            self.ekf.P[:2, :2] += np.eye(2) * 0.01
-            self.ekf.P[2, 2] += 0.002
+            # admit that we are (partly) lost: inflate covariance so that scan
+            # matching / landmarks re-anchor the estimate and the supervisor reacts
+            self.ekf.P[:2, :2] += np.eye(2) * 0.004
+            self.ekf.P[2, 2] += 0.001
             self.prov.add_evidence(f"diag:{len(self.diag.diagnoses)}", dg.t, "world_model",
                                    {"cause": "loc_drift", "p": dg.prob})
 

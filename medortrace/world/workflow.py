@@ -107,6 +107,17 @@ def generate_workflow(spec: SceneSpec, cfg: dict, streams: RngStreams) -> Workfl
     tasks["circulator"].append(StaffTask(t0, bt_edge, 5.0, "open implant"))
     move(t0 + 5.0, "implant_box_1", "hand:circulator", "back_table:tray", WT.OPEN)
 
+    # ---- 1b. CF-B only: empty implant packaging discarded in the waste bin -----
+    # (gives the robot a verification leg through the south aisle where the
+    #  ghost / real obstacle lies)
+    if hc.get("factor") == "CF-B":
+        tw = t0 + float(R.uniform(20.0, 35.0))
+        wb_edge = spec.slot("waste_bin:inside").position[:2] + np.array([0.65, 0.55])
+        tasks["circulator"].append(StaffTask(tw - 12.0, bt_edge, 3.0, "collect packaging"))
+        move(tw - 8.0, "implant_box_1", "back_table:tray", "hand:circulator", None)
+        tasks["circulator"].append(StaffTask(tw - 6.0, wb_edge, 5.0, "discard packaging"))
+        move(tw, "implant_box_1", "hand:circulator", "waste_bin:inside", WT.DISCARD)
+
     # ---- 2. sponges to the field and discards --------------------------------
     sponges = [i.id for i in spec.items if i.cls == "sponge"]
     t_use = np.sort(R.uniform(0.15 * T, 0.40 * T, size=len(sponges)))

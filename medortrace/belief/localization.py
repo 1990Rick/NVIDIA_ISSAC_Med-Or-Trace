@@ -77,6 +77,21 @@ class EkfLocalizer:
             self.accepted += 1
             self.last_update_t = t
 
+    def update_pose(self, z: np.ndarray, R: np.ndarray, gate: float = 16.0) -> bool:
+        """Direct pose pseudo-measurement (scan-to-map alignment / operator re-localisation)."""
+        y = np.asarray(z, float) - self.x
+        y[2] = wrap_angle(y[2])
+        S = self.P + R
+        nis = float(y @ np.linalg.solve(S, y))
+        if nis > gate * 4:
+            return False
+        K = self.P @ np.linalg.inv(S)
+        self.x = self.x + K @ y
+        self.x[2] = wrap_angle(self.x[2])
+        I_K = np.eye(3) - K
+        self.P = I_K @ self.P @ I_K.T + K @ R @ K.T
+        return True
+
     @property
     def nis_avg(self) -> float:
         return float(np.mean(self.nis_hist)) if self.nis_hist else 2.0
