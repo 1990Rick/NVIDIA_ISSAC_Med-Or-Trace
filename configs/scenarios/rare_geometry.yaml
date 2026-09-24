@@ -1,0 +1,5 @@
+# Rare but physically plausible geometry failures (subset chosen per seed by the registry).
+extends: scenarios/default.yaml
+family: rare_geometry
+faults:
+  rare_geometry: [iv_pole_fallen, boom_lowered, drape_trailing, cart_tipped]

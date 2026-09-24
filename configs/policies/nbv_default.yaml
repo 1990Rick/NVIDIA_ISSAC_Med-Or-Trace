@@ -1,0 +1,14 @@
+# Next-best-view objective weights (see medortrace/planning/nbv.py).
+# Hand-tuned defaults; `scripts/train_nbv_policy.py` writes optimised variants.
+weights:
+  w_eig: 4.0        # expected item-custody information gain
+  w_modal: 2.0      # information gain via radar/acoustic on hidden slots
+  w_unc: 0.02       # new map-uncertainty mass in view
+  w_path: 0.5       # per metre of path
+  w_turn: 0.15      # per radian of heading change
+  w_risk: 2.0       # human-proximity risk at/towards the viewpoint
+  w_sterile: 0.5    # proximity to the sterile boundary
+  w_urgent: 3.0     # pending-claim slot urgency
+  w_commit: 1.0     # hysteresis bonus for the incumbent goal
+  w_watch: 1.5      # anticipation: expected hand-off rate x detection probability over slots in view
+  w_traffic: 3.0    # time-averaged staff traffic density at the viewpoint (keep out of walkways)

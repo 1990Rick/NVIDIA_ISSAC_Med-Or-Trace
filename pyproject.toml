@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medortrace"
+version = "0.1.0"
+description = "MED-OR-TRACE: object-chain verifier for operating-room logistics (NVIDIA Isaac Sim digital twin + autonomy stack)"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+usd = ["usd-core>=24.0"]
+train = ["torch>=2.1", "torchvision>=0.16", "pillow"]
+
+[tool.setuptools.packages.find]
+include = ["medortrace*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["ros2_ws/build", "ros2_ws/install"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E731", "B008", "B905", "E741"]  # E741: O/I are ray origins / identity in the maths code

@@ -1,0 +1,6 @@
+# Intermittent sensor dropouts (Poisson arrivals, exponential durations).
+extends: scenarios/default.yaml
+family: sensor_dropout
+faults:
+  dropout_rate_per_min: {lidar: 1.0, camera: 1.5, radar: 1.0, landmarks: 1.0, odom: 0.3, acoustic: 0.5}
+  dropout_mean_s: 5.0

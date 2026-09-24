@@ -1,0 +1,6 @@
+# Counterfactual factor CF-C. Clamp leaves the mayo stand without a log entry: dropped to the floor vs. handed to the assistant.
+# The registry instantiates matched pairs: same seed (identical nuisance, staff,
+# workflow and sensor-noise streams), hidden_cause.value in {dropped_floor, handed_off}.
+extends: scenarios/default.yaml
+family: counterfactual
+hidden_cause: {factor: CF-C, value: dropped_floor}

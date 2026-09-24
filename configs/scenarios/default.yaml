@@ -1,0 +1,88 @@
+# MED-OR-TRACE default scenario configuration.
+# Every other scenario file `extends:` this one and overrides only what differs.
+family: nominal
+scenario_id: default
+
+episode:
+  duration_s: 180.0
+  dt: 0.1                     # control period (10 Hz)
+
+layout:
+  room_width: [8.0, 9.5]
+  room_depth: [7.5, 8.5]
+
+items:
+  sponges: 4
+
+nuisance:                     # randomised, *non-causal* factors
+  clutter_count: [2, 6]
+  haze: [0.0, 0.15]
+  glare_gain: [0.8, 1.3]
+  material_perturb_scale: 1.0
+
+hidden_cause:                 # the causal factor under study (see world/generator.py)
+  factor: none
+  value: none
+
+workflow:
+  p_log_missing: 0.05
+  log_time_jitter_s: 1.5
+  p_log_mislabel: 0.02
+  claim_grace_s: 25.0          # verification window of a handoff / place / discard claim
+  count_grace_s: 90.0          # verification window of each item claim implied by a surgical count
+
+faults:
+  dropout_rate_per_min: {}    # e.g. {lidar: 0.5, camera: 1.0}
+  dropout_mean_s: 6.0
+  timestamp_skew: {}          # e.g. {camera: {offset_s: [0.1, 0.3], drift_ppm: 200}}
+  loc_drift: null             # e.g. {v_scale_error: [0.03, 0.08], omega_bias: [0.01, 0.03]}
+  map_corruption: null        # e.g. {shift_n: 1, max_shift: 0.5, phantom_n: 1, drop_n: 0}
+  specular_gain: 1.0
+  floor_wet: false
+  rare_geometry: []           # iv_pole_fallen | boom_lowered | drape_trailing | cart_tipped
+  adversarial_occluders: []   # linen_stack_kick_bucket | screen_back_table
+
+robot:
+  footprint_radius: 0.28
+  height_m: 1.55
+  max_v: 0.7
+  max_omega: 1.2
+  max_acc: 0.6
+  max_alpha: 1.8
+  mass_kg: 55.0
+  battery_capacity_wh: 480.0
+  battery_start_frac: [0.55, 0.95]
+  power_idle_w: 38.0
+  power_sensors_w: 27.0
+  power_acoustic_w: 4.0
+  rolling_resistance: 0.02
+  drivetrain_efficiency: 0.75
+
+sensors:
+  rates_hz: {lidar: 5.0, camera: 5.0, radar: 10.0, landmarks: 5.0, acoustic: 2.0}
+  lidar: {rings: 12, elev_min_deg: -15.0, elev_max_deg: 15.0, az_res_deg: 2.0, max_range: 20.0,
+          range_sigma: 0.02, mount_height: 0.9}
+  camera: {mount_height: 1.45, pitch_deg: -25.0, hfov_deg: 90.0, vfov_deg: 65.0, max_range: 5.0}
+  radar: {mount_height: 0.6, fov_deg: 120.0, max_range: 15.0}
+  acoustic: {max_range: 3.5}
+
+agents:
+  A_agent: 2.0
+  B_agent: 0.3
+  A_robot: 4.0
+  B_robot: 0.45
+  tau: 0.5
+  yield_distance: 1.3
+
+safety:
+  sterile_keepout_margin: 0.3   # AORN: >= 12 in (0.3 m) from the sterile field
+
+autonomy:
+  policy: active              # active | fixed_route | passive
+  modalities: [lidar, camera, radar, acoustic]
+  use_workflow_log: true
+  use_ghost_reasoning: true
+  use_temporal_model: true
+  use_safety_supervisor: true
+  deterministic_map: false
+  nbv_weights: configs/policies/nbv_default.yaml

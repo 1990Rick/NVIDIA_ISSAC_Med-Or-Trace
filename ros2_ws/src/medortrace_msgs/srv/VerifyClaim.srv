@@ -1,0 +1,15 @@
+# Ask the robot to verify "item_id is in slot_id at t_ref". The claim is queued in the claim
+# verifier; the verdict is published on /medortrace/verification/verdicts when decided
+# (VERIFIED / REFUTED with direct evidence, or ABSTAIN at the deadline).
+string item_id
+string slot_id
+builtin_interfaces/Time t_ref           # zero = now
+float64 deadline_s                      # decision deadline after t_ref [s]; <= 0 = mission claim grace
+string claim_id                         # optional; generated when empty
+---
+bool accepted
+string claim_id
+string message
+float64 current_posterior               # filtered P(item in slot) right now (not the verdict)
+bool decided                            # true if this claim id already has a verdict (returned below)
+ClaimVerdict verdict

@@ -1,0 +1,101 @@
+# Parameters of the MED-OR-TRACE ROS 2 nodes (defaults for simulation; robot.launch.py overrides the
+# robot-specific ones). Node names are those created by the executables.
+
+medortrace_autonomy:
+  ros__parameters:
+    mission_source: topic              # topic | scenario | file
+    mission_file: ""                   # mission_source=file (JSON/YAML, see medortrace_ros/mission.py)
+    scenario: scenarios/nominal.yaml   # mission_source=scenario
+    seed: 0
+    duration: 0.0                      # 0 = scenario default
+    clock_offset_s: 100.0              # mission_source=scenario: t0 (= sim_bridge clock_offset_s)
+    base_config: scenarios/default.yaml   # robot-side defaults under the mission's cfg
+    policy: ""                         # override autonomy.policy (active | fixed_route | passive)
+    autonomy_overrides_json: "{}"      # deep-merged into the stack cfg, e.g. {"autonomy": {"use_ghost_reasoning": false}}
+    time_origin: mission               # mission (mission t0) | start (ROS now at load) | zero
+    control_rate_hz: 10.0              # must equal 1 / episode.dt for lockstep simulation
+    required_channels: [odom]          # wait for these before the first tick ...
+    ready_timeout_s: 5.0               # ... but at most this long (wall time)
+    beliefs_rate_hz: 2.0
+    scene_graph_rate_hz: 1.0
+    maps_rate_hz: 1.0
+    diagnostics_rate_hz: 1.0
+    publish_tf: true                   # map -> odom from the EKF estimate
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    stop_at_mission_end: true          # finalise claims (ABSTAIN if undecided) and hold zero velocity at t >= duration
+    audit_dir: ""                      # write provenance.json / verdicts.jsonl / ... here at mission end
+    telemetry_keep: 600
+    verdict_evidence_k: 8
+    battery:
+      capacity_wh: 480.0
+    radar:
+      input: detections                # detections (RadarDetectionArray) | pointcloud2 (driver cloud)
+      velocity_field: velocity
+      rcs_field: intensity
+      rcs_is_db: false
+    lidar:
+      sensor_height: -1.0              # <= 0: sensors.lidar.mount_height of the mission cfg (rig.yaml lidar_link z)
+      regrid_to_pattern: false         # true for x,y,z clouds (drivers, Isaac RTX helper): re-bin them onto the
+                                       # ray grid below, nearest return per cell, empty cells = no-return rays
+      pattern:                         # rings / elevations: the physical sensor (OR16)
+        rings: 16
+        elev_min_deg: -15.0
+        elev_max_deg: 15.0
+        az_res_deg: 0.0                # <= 0: sensors.lidar.az_res_deg of the mission cfg (2 deg -> 16 x 180 rays,
+                                       # the grid IsaacBackend uses; the sensor's native 0.2 deg is 10x the rays)
+        max_range: 0.0                 # <= 0: sensors.lidar.max_range of the mission cfg
+    max_age:                           # assembler staleness limits [s] (receive age); see medortrace_ros/assembler.py
+      lidar: 0.5
+      camera: 0.5
+      radar: 0.3
+      acoustic: 1.0
+      landmarks: 0.5
+      odom: 0.25
+      contact: 0.25
+      battery: 60.0
+      imu: 0.5
+    qos_file: ""                       # "" = share/medortrace_ros/config/qos.yaml
+
+medortrace_sim_bridge:
+  ros__parameters:
+    backend: lite                      # lite | isaac (isaac: run under Isaac Sim's python.sh)
+    scenario: scenarios/nominal.yaml
+    seed: 0
+    duration: 0.0
+    policy: ""                         # written into the mission cfg
+    autonomy_overrides_json: "{}"
+    lockstep: true                     # one sim step per autonomy command
+    lockstep_timeout_s: 2.0
+    rate_factor: 1.0                   # x real time (0 = as fast as possible)
+    wait_for_autonomy: true            # do not advance time before /medortrace/cmd_vel has a publisher
+    clock_offset_s: 100.0              # /clock = sim time + offset (= mission t0)
+    publish_groups: [clock, tf, lidar, camera, radar, acoustic, landmarks, imu, odom, contact, battery, workflow,
+                     mission, ground_truth]
+    publish_ground_truth: true
+    publish_workflow: true             # false when workflow_gateway_node replays the OR log instead
+    lidar_ground_truth_fields: true    # gt_ghost / gt_object fields (supervision statistics only)
+    shutdown_on_finish: false
+    isaac_graph: false
+    qos_file: ""
+
+medortrace_workflow_gateway:
+  ros__parameters:
+    log_file: ""                       # JSONL: OR log, dataset events.jsonl or voice transcript
+    mode: replay                       # replay | follow (tail a live file)
+    time_origin: mission               # mission | start | zero
+    time_shift_s: 0.0
+    vocabulary_file: ""                # "" = share/medortrace_ros/config/voice_vocabulary.yaml
+    qos_file: ""
+
+medortrace_operator_console:
+  ros__parameters:
+    mode: auto                         # auto | rviz | interactive
+    operator_id: operator_console
+    delay_min_s: 8.0                   # auto: SimulatedOperator response delay
+    delay_max_s: 20.0
+    seed: 0
+    relocalize_from_ground_truth: true
+    ack_without_pose_after_s: 0.0
+    qos_file: ""

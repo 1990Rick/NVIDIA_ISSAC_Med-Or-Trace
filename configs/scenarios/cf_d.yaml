@@ -1,0 +1,6 @@
+# Counterfactual factor CF-D. Scan/map mismatch: odometry drift vs. an instrument cart moved since the survey.
+# The registry instantiates matched pairs: same seed (identical nuisance, staff,
+# workflow and sensor-noise streams), hidden_cause.value in {loc_drift, cart_moved}.
+extends: scenarios/default.yaml
+family: counterfactual
+hidden_cause: {factor: CF-D, value: loc_drift}

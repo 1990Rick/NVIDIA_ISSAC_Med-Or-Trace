@@ -1,0 +1,16 @@
+# RTX acoustic (EXPERIMENTAL) - active 40 kHz ultrasonic probe used for
+# "is there a hard reflector under this drape / in this bin?" hypotheses.
+# When the RTX acoustic sensor extension is unavailable, medortrace.isaac.sensors
+# falls back to a PhysX scene-query echo model with the same message contract.
+name: medortrace_us40k
+experimental: true
+extension_candidates: [isaacsim.sensors.rtx.acoustic, omni.sensors.nv.acoustic]
+carrier_hz: 40000
+speed_of_sound_mps: 343.0
+beamwidth_deg: 12.0
+max_range_m: 3.5
+range_gate_m: 0.25
+diffraction_attenuation: 0.45     # non line-of-sight path energy factor (fitted)
+noise_sigma: 0.05
+update_rate_hz: 2.0
+regions: [patient_drape, back_table_towel, waste_bin]

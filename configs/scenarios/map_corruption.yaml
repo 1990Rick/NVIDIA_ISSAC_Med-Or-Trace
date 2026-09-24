@@ -1,0 +1,5 @@
+# Stale / corrupted prior map: movable objects shifted, a phantom object, a missing bin.
+extends: scenarios/default.yaml
+family: map_corruption
+faults:
+  map_corruption: {shift_n: 2, max_shift: 0.6, phantom_n: 1, drop_n: 1}

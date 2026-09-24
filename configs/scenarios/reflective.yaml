@@ -1,0 +1,9 @@
+# Highly specular environment: polished steel, wet floor, strong surgical-light glare.
+extends: scenarios/default.yaml
+family: reflective
+faults:
+  specular_gain: 1.6
+  floor_wet: true
+nuisance:
+  glare_gain: [1.2, 1.6]
+  haze: [0.05, 0.25]

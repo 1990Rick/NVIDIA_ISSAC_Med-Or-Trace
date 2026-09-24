@@ -1,0 +1,6 @@
+# Counterfactual factor CF-A. Retained sponge: under the drape vs. correctly in the kick bucket (identical workflow log).
+# The registry instantiates matched pairs: same seed (identical nuisance, staff,
+# workflow and sensor-noise streams), hidden_cause.value in {under_drape, kick_bucket}.
+extends: scenarios/default.yaml
+family: counterfactual
+hidden_cause: {factor: CF-A, value: under_drape}

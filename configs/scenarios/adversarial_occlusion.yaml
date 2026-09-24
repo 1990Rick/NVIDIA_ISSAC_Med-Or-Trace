@@ -1,0 +1,7 @@
+# Occluders deliberately placed on the key lines of sight (linen cart, steel screen).
+extends: scenarios/default.yaml
+family: adversarial_occlusion
+faults:
+  adversarial_occluders: [linen_stack_kick_bucket, screen_back_table]
+nuisance:
+  clutter_count: [5, 8]

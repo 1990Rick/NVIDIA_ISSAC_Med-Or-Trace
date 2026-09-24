@@ -1,0 +1,6 @@
+# Counterfactual factor CF-B. Lidar return in the aisle: specular multipath ghost of the hamper vs. a real obstacle hidden behind the screen.
+# The registry instantiates matched pairs: same seed (identical nuisance, staff,
+# workflow and sensor-noise streams), hidden_cause.value in {specular_ghost, real_obstacle}.
+extends: scenarios/default.yaml
+family: counterfactual
+hidden_cause: {factor: CF-B, value: specular_ghost}

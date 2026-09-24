@@ -1,0 +1,122 @@
+# Next-best-view objective weights tuned by scripts/train_nbv_policy.py (CEM, lite simulator).
+# Use with: autonomy: {nbv_weights: policies/nbv_trained.yaml}
+# cfg_hash bbff27dc5095a4bb; 1 iterations, 2 episodes evaluated.
+# WARNING: smoke-scale search (< 50 episodes) - NOT a tuned policy.
+weights:
+  w_eig: 2.945904429310262
+  w_modal: 1.9553888180946912
+  w_unc: 0.01847000422411176
+  w_path: 0.7294081866545999
+  w_turn: 0.18547335282192717
+  w_risk: 1.4171574772405453
+  w_sterile: 0.33557698667575936
+  w_urgent: 3.075642416347714
+  w_commit: 0.7306344324760797
+provenance:
+  method: cross_entropy_method
+  objective:
+    handoff_success: 1.0
+    1-abstention_rate: 0.5
+    wrong_assertion_rate: -2.0
+    near_collision_rate_per_min: -0.5
+    task_delay_s: -0.01
+    collisions_agent: -5.0
+    sterile_breach_s: -5.0
+  search_config:
+    iters: 1
+    pop: 2
+    elite: 1
+    episodes: 1
+    duration: 20.0
+    workers: 2
+    keys: null
+    sigma0: 0.5
+    sigma_min: 0.05
+    sigma_max: 1.5
+    alpha: 0.7
+    extra_noise: 0.1
+    log_bounds:
+    - -4.0
+    - 4.0
+    include_mean: true
+    resample_entries: true
+    stratify: true
+    seed: 0
+    split: train
+    family: null
+    factor: null
+    policy: active
+    backend: lite
+    error_penalty: -10.0
+    final: mean
+    objective:
+      handoff_success: 1.0
+      1-abstention_rate: 0.5
+      wrong_assertion_rate: -2.0
+      near_collision_rate_per_min: -0.5
+      task_delay_s: -0.01
+      collisions_agent: -5.0
+      sterile_breach_s: -5.0
+  cfg_hash: bbff27dc5095a4bb
+  iterations: 1
+  episodes_evaluated: 2
+  episode_errors: 0
+  base_weights:
+    w_eig: 4.0
+    w_modal: 2.0
+    w_unc: 0.02
+    w_path: 0.5
+    w_turn: 0.15
+    w_risk: 2.0
+    w_sterile: 0.5
+    w_urgent: 3.0
+    w_commit: 1.0
+  final: mean
+  final_sigma_log:
+    w_eig: 0.25
+    w_modal: 0.25
+    w_unc: 0.25
+    w_path: 0.25
+    w_turn: 0.25
+    w_risk: 0.25
+    w_sterile: 0.25
+    w_urgent: 0.25
+    w_commit: 0.25
+  best_candidate:
+    objective: 0.5176666666666667
+    iteration: 0
+    candidate: cand_1
+    weights:
+      w_eig: 2.5839651465138536
+      w_modal: 1.9365756617768315
+      w_unc: 0.017850660081953615
+      w_path: 0.8575444040643069
+      w_turn: 0.20313821684092664
+      w_risk: 1.222640377193667
+      w_sterile: 0.28286101673349445
+      w_urgent: 3.1086416727362436
+      w_commit: 0.6386838102532608
+  objective_history:
+  - iteration: 0
+    best: 0.5176666666666667
+    mean: 0.23733333333333342
+    elite_mean: 0.5176666666666667
+    incumbent: -0.04299999999999985
+    n_errors: 0
+    wall_s: 10.3
+  seeds:
+  - iteration: 0
+    entries:
+    - scenario_id: nominal__0014
+      seed: 93477039
+      cfg_hash: 4908feafa21770d0
+      split: train
+      family: nominal
+  generator: scripts/train_nbv_policy.py
+  command: train_nbv_policy.py --iters 1 --pop 2 --elite 1 --episodes 1 --duration 20 --workers 2 --out runs/policy_search_smoke
+  created_utc: '2026-09-24T17:36:29+00:00'
+  git_commit: 72faa960fe6cb1ff9b7dbfe63cf14e26f6b59e02+dirty
+  registry: configs/seed_registry.yaml
+  base_policy: policies/nbv_default.yaml
+  run_dir: runs/policy_search_smoke
+  smoke_scale: true

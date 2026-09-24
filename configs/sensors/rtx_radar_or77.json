@@ -1,0 +1,25 @@
+{
+  "class": "sensor",
+  "type": "radar",
+  "name": "MedOrTrace_77GHz_SRR",
+  "profile": {
+    "carrierFrequencyGHz": 77.0,
+    "bandwidthGHz": 4.0,
+    "maxRangeM": 15.0,
+    "rangeResolutionM": 0.0375,
+    "maxVelocityMps": 8.0,
+    "velocityResolutionMps": 0.05,
+    "azimuthFovDeg": 120.0,
+    "elevationFovDeg": 30.0,
+    "azimuthResolutionDeg": 2.0,
+    "frameRateHz": 10.0,
+    "scanType": "SRR",
+    "outputs": [
+      "range",
+      "azimuth",
+      "elevation",
+      "radialVelocity",
+      "rcs"
+    ]
+  }
+}

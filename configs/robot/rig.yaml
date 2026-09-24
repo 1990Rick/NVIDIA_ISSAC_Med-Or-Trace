@@ -1,0 +1,20 @@
+# MED-OR-TRACE mobile verifier rig (single source of truth for USD rig, lite sim and ROS 2 TF).
+# Differential-drive base in the class of hospital AMRs (0.56 m wide), sensor mast 1.55 m.
+name: medortrace_rig_v1
+footprint_radius: 0.28
+height_m: 1.55
+wheel_radius: 0.085
+wheel_track: 0.44
+wheel_max_torque_nm: 40.0
+base_mass_kg: 42.0
+arm_max_torque_nm: 15.0
+gripper_max_force_n: 25.0
+camera_hfov_deg: 90.0
+limits: {max_v: 0.7, max_omega: 1.2, max_acc: 0.6, max_alpha: 1.8}
+battery: {capacity_wh: 480.0, chemistry: LiFePO4, nominal_v: 25.6}
+frames:                       # xyz in metres from the floor-level base footprint, rpy in degrees
+  lidar_link:    {xyz: [0.10, 0.0, 0.90], rpy_deg: [0, 0, 0],  sensor: rtx_lidar,    config: sensors/rtx_lidar_or16.json}
+  camera_link:   {xyz: [0.00, 0.0, 1.45], rpy_deg: [0, 25, 0], sensor: rtx_camera,   config: sensors/rtx_camera.yaml}
+  radar_link:    {xyz: [0.25, 0.0, 0.60], rpy_deg: [0, 0, 0],  sensor: rtx_radar,    config: sensors/rtx_radar_or77.json}
+  acoustic_link: {xyz: [0.10, 0.0, 1.20], rpy_deg: [0, 0, 0],  sensor: rtx_acoustic, config: sensors/rtx_acoustic.yaml}
+  imu_link:      {xyz: [0.00, 0.0, 0.20], rpy_deg: [0, 0, 0],  sensor: physics_imu,  config: sensors/physics_sensors.yaml}
