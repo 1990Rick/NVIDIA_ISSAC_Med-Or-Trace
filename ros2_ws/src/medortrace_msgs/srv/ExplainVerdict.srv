@@ -1,0 +1,10 @@
+# Explain a verdict: strongest supporting / contradicting evidence from the provenance graph
+# (ProvenanceGraph.explain) and the item's verified custody chain (ProvenanceGraph.handoff_chain).
+string claim_id
+uint32 max_evidence                     # evidence per side; 0 = 5
+---
+bool found
+string message
+ClaimVerdict verdict
+string explanation_json
+string custody_chain_json

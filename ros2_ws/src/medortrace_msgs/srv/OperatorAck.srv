@@ -1,0 +1,10 @@
+# Operator acknowledgement of a HANDOVER request (AutonomyStack.operator_intervention).
+# Optionally re-localises the robot (e.g. from the OR camera system or an RViz 2D pose estimate).
+string operator_id
+bool relocalize
+Pose2D pose_hint                        # map frame; used only when relocalize is true
+string note
+---
+bool accepted
+string message
+uint8 mode_after                        # SafetyState mode code right after the acknowledgement

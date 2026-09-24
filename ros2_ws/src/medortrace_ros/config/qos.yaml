@@ -1,0 +1,29 @@
+# QoS profiles of the MED-OR-TRACE ROS 2 graph (loaded by medortrace_ros/qos.py).
+# Topic -> profile assignment lives in medortrace_ros/topics.py (TopicSpec.qos); per-topic overrides below.
+#
+# Rationale (docs/ros2_message_graph.md, "QoS rationale"):
+#   * sensor data is BEST_EFFORT / VOLATILE with a shallow queue: a late scan is worse than a lost scan,
+#     the assembler only ever uses the newest message, and best-effort subscribers accept both
+#     best-effort and reliable driver publishers;
+#   * verdicts and provenance are RELIABLE / TRANSIENT_LOCAL with a deep history: they are the audit
+#     record, must not be dropped, and late joiners (OR dashboard, audit logger) must receive the history;
+#   * mission and current state (safety state, beliefs, maps) are RELIABLE / TRANSIENT_LOCAL depth 1:
+#     a late joiner immediately gets the latest value (latched-topic semantics);
+#   * commands are RELIABLE / VOLATILE depth 1: compatible with both reliable and best-effort subscribers
+#     (e.g. the Isaac Sim OmniGraph twist subscriber) and never replayed to a late joiner.
+profiles:
+  clock:          {reliability: reliable,    durability: volatile,        history: keep_last, depth: 1}
+  tf:             {reliability: reliable,    durability: volatile,        history: keep_last, depth: 100}
+  sensor_data:    {reliability: best_effort, durability: volatile,        history: keep_last, depth: 5}
+  sensor_dense:   {reliability: best_effort, durability: volatile,        history: keep_last, depth: 2}
+  command:        {reliability: reliable,    durability: volatile,        history: keep_last, depth: 1}
+  events:         {reliability: reliable,    durability: transient_local, history: keep_last, depth: 500}
+  latched:        {reliability: reliable,    durability: transient_local, history: keep_last, depth: 1}
+  state:          {reliability: reliable,    durability: transient_local, history: keep_last, depth: 1}
+  state_volatile: {reliability: reliable,    durability: volatile,        history: keep_last, depth: 5}
+  audit:          {reliability: reliable,    durability: transient_local, history: keep_last, depth: 2000}
+
+# Per-topic overrides (keys of medortrace_ros.topics.TOPICS), merged over the profile.
+overrides:
+  imu: {depth: 50}                 # 10 samples per 0.1 s control tick must survive one missed spin
+  workflow: {depth: 1000}          # full case record for a late-joining autonomy node

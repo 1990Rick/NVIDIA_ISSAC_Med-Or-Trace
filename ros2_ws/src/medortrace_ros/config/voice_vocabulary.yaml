@@ -1,0 +1,61 @@
+# Spoken-phrase vocabulary of the workflow gateway's voice-transcript parser
+# (medortrace_ros/workflow_gateway_node.py:parse_transcript). Phrases are matched longest-first on the
+# lower-cased transcript after number words are turned into digits ("sponge two" -> "sponge 2").
+# Keep ids identical to the mission's slot / item ids.
+
+items:                         # spoken item name -> id template ({n} = spoken number, default 1)
+  sponge: "sponge_{n}"
+  lap: "sponge_{n}"
+  clamp: "clamp_{n}"
+  needle driver: "needle_driver_{n}"
+  driver: "needle_driver_{n}"
+  specimen: "specimen_{n}"
+  implant box: "implant_box_{n}"
+  implant: "implant_box_{n}"
+
+places:                        # spoken place -> slot id
+  back table tray: "back_table:tray"
+  back table: "back_table:tray"
+  tray: "back_table:tray"
+  specimen cup: "back_table:specimen_cup"
+  cup: "back_table:specimen_cup"
+  under the towel: "back_table:under_towel"
+  mayo stand: "mayo:top"
+  mayo: "mayo:top"
+  field: "field:top"
+  sterile field: "field:top"
+  under the drape: "field:under_drape"
+  kick bucket 1: "kick_bucket_1:inside"
+  kick bucket 2: "kick_bucket_2:inside"
+  kick bucket: "kick_bucket_1:inside"
+  bucket: "kick_bucket_1:inside"
+  waste bin: "waste_bin:inside"
+  waste: "waste_bin:inside"
+  specimen counter: "specimen_counter:top"
+  counter: "specimen_counter:top"
+  cart 1: "cart_1:top"
+  cart 2: "cart_2:top"
+  floor: "floor:foot_of_table"
+
+roles:                         # spoken person -> hand slot / reporter role
+  surgeon: "surgeon"
+  doctor: "surgeon"
+  assistant: "assistant"
+  scrub nurse: "scrub_nurse"
+  scrub: "scrub_nurse"
+  circulator: "circulator"
+  circulating nurse: "circulator"
+  anesthetist: "anesthetist"
+  anaesthetist: "anesthetist"
+
+verbs:                         # event type -> trigger phrases (checked in this order)
+  count: ["count", "counting", "counted"]
+  specimen_out: ["specimen out", "specimen is out", "specimen removed", "specimen off"]
+  discard: ["discard", "discarded", "discarding", "into the bucket", "toss", "tossed", "throw away"]
+  open: ["open", "opened", "opening"]
+  place: ["place", "placed", "placing", "put", "putting", "set down", "back on"]
+  handoff: ["pass", "passing", "passed", "hand", "handing", "handed", "give", "giving", "take", "taking"]
+
+count_phases:                  # COUNT payload phase from phrases
+  final_count: ["final"]
+  first_closing_count: ["first", "closing", "initial"]

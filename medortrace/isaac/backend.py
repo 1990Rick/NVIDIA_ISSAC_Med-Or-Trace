@@ -3,46 +3,92 @@
 Pipeline per control tick (10 Hz by default):
 
 1. apply the gated velocity command to the wheel drives (PhysX articulation);
+   with ``drive="external"`` the wheels are driven by the ROS 2 OmniGraph
+   (``/medortrace/cmd_vel``) instead and the command's twist is ignored;
 2. advance staff behaviour (``StaffPopulation`` actual + robot-free shadow) and
    move the USD staff proxies;
 3. apply ground-truth custody moves (workflow truth incl. hidden causes) by
-   teleporting item rigid bodies to their slot / the holder's hand;
-4. step PhysX ``physics_substeps`` times (120 Hz), rendering on the last
-   substep so RTX sensors produce data;
+   teleporting the (kinematic) item bodies to their slot / the holder's hand,
+   with the lite simulator's placement rules (``medortrace.isaac.truth``) and
+   toggling visibility for items entering/leaving the room;
+4. advance the world by one control period with a single rendered
+   ``World.step``: PhysX runs ``rendering_dt / physics_dt`` (= 12) substeps
+   internally, and RTX sensors see exactly one control period per frame;
 5. read RTX/physics sensors at their configured rates, apply the episode's
    fault model (dropouts, clock skew, odometry bias) and return a
    :class:`SensorBundle` identical in type to the lite backend's.
 
 The *same* ``Episode`` (scene spec, workflow, faults, prior map) drives both
-backends; the USD stage is authored from it on reset.
+backends; the USD stage is authored from it on reset.  RNG parity: the battery
+start charge, workflow-log latencies and item offsets consume the same streams
+/ forks as ``LiteBackend``.
+
+Backend options (``staff_mode``, ``detector``, ``drive``, ...) are not part of
+the scenario config, so a registry entry keeps its ``cfg_hash`` on either
+backend.  ``eval.runner.make_backend`` constructs ``IsaacBackend(cfg)``; entry
+scripts set process-wide options with :meth:`IsaacBackend.configure` and can
+register :meth:`IsaacBackend.add_reset_hook` callbacks (e.g. building the ROS 2
+graph once the sensors' render products exist).
 """
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 from medortrace.common.config import CONFIG_DIR, load_yaml
-from medortrace.common.geometry import wrap_angle
 from medortrace.common.msgs import Header, SensorBundle, VelocityCommand, WheelOdometry
-from medortrace.isaac.compat import world_cls, xform_prim_cls
+from medortrace.isaac.compat import XformGroup, world_cls
+from medortrace.isaac.truth import CustodyTimeline, item_offsets, item_position, item_prim_center
 from medortrace.sim.backend import SimBackend, TruthSnapshot
 from medortrace.sim.episode import Episode
 from medortrace.usd.robot_rig import build_rig
-from medortrace.usd.scene_builder import build_stage
+from medortrace.usd.scene_builder import build_stage, safe
 from medortrace.world.agents import StaffPopulation
+
+ROBOT_PRIM = "/World/Robot"
+PHYSICS_SCENE = "/World/PhysicsScene"     # authored by medortrace.usd.scene_builder
+DEFAULT_OPTIONS = {
+    "staff_mode": "capsule",        # capsule | people
+    "detector": "gt_surrogate",     # gt_surrogate | model:<path>
+    "physics_hz": 120.0,
+    "work_dir": None,               # where the episode's USD stage + rig are authored
+    "drive": "internal",            # internal (stack commands) | external (ROS 2 cmd_vel graph)
+    "items_kinematic": True,        # custody moves are ground-truth teleports
+    "normalize_nonvisual": True,    # map non-vocabulary RTX material tokens to their aliases
+}
 
 
 class IsaacBackend(SimBackend):
-    def __init__(self, cfg: dict | None = None, physics_hz: float = 120.0, staff_mode: str = "capsule",
-                 detector: str = "gt_surrogate", work_dir: str | None = None):
+    options: dict = dict(DEFAULT_OPTIONS)
+    reset_hooks: list[Callable[["IsaacBackend"], None]] = []
+
+    @classmethod
+    def configure(cls, **kw) -> None:
+        unknown = set(kw) - set(DEFAULT_OPTIONS)
+        if unknown:
+            raise ValueError(f"unknown IsaacBackend options {sorted(unknown)}; known: {sorted(DEFAULT_OPTIONS)}")
+        cls.options = {**cls.options, **kw}
+
+    @classmethod
+    def add_reset_hook(cls, fn: Callable[["IsaacBackend"], None]) -> None:
+        cls.reset_hooks = [*cls.reset_hooks, fn]
+
+    def __init__(self, cfg: dict | None = None, **overrides):
+        opts = {**self.options, **overrides}
+        unknown = set(opts) - set(DEFAULT_OPTIONS)
+        if unknown:
+            raise ValueError(f"unknown IsaacBackend options {sorted(unknown)}")
         self._cfg = cfg or {}
-        self.physics_hz = physics_hz
-        self.staff_mode = staff_mode
-        self.detector = detector
-        self.work_dir = Path(work_dir or tempfile.mkdtemp(prefix="medortrace_isaac_"))
+        self.opts = opts
+        self.physics_hz = float(opts["physics_hz"])
+        self.staff_mode = opts["staff_mode"]
+        self.detector = opts["detector"]
+        self.drive = opts["drive"]
+        self.work_dir = Path(opts["work_dir"] or tempfile.mkdtemp(prefix="medortrace_isaac_"))
         self._t = 0.0
         self._dt = 0.1
         self.world = None
@@ -57,106 +103,149 @@ class IsaacBackend(SimBackend):
 
     # ------------------------------------------------------------------
     def reset(self, episode: Episode) -> SensorBundle:
-        import omni.usd
-        from medortrace.isaac.robot import RobotController
+        from pxr import UsdGeom
+
+        from medortrace.isaac.compat import open_stage, usd_stage
+        from medortrace.isaac.robot import RobotController, find_articulation_root
         from medortrace.isaac.sensors import (AcousticAdapter, CameraAdapter, ContactAdapter, ImuAdapter,
-                                              LandmarkAdapter, RtxLidarAdapter, RtxRadarAdapter)
+                                              LandmarkAdapter, RtxLidarAdapter, RtxRadarAdapter,
+                                              normalize_nonvisual_tokens)
         from medortrace.isaac.staff import StaffDriver
         from medortrace.sim.lite_backend import RobotParams
 
         self.episode = ep = episode
         cfg = ep.cfg
+        spec = ep.spec
         self._dt = float(cfg.get("episode", {}).get("dt", 0.1))
         self._t = 0.0
         rig = load_yaml(CONFIG_DIR / "robot" / "rig.yaml")
+        phys = load_yaml(CONFIG_DIR / "sensors" / "physics_sensors.yaml")
         rig_path = self.work_dir / "robot" / "medortrace_rig.usda"
         build_rig(rig_path, rig)
-        scene_path = self.work_dir / "scenes" / f"{ep.spec.scenario_id or 'episode'}.usda"
-        build_stage(ep.spec, ep.materials, scene_path, robot_rig=f"../robot/{rig_path.name}")
-        omni.usd.get_context().open_stage(str(scene_path))
+        self.scene_path = self.work_dir / "scenes" / f"{spec.scenario_id or 'episode'}.usda"
+        build_stage(spec, ep.materials, self.scene_path, robot_rig=f"../robot/{rig_path.name}")
+        open_stage(str(self.scene_path))
+        stage = usd_stage()
+        self.item_ids = [i.id for i in spec.items]
+        self.item_paths = [f"/World/Items/{safe(i)}" for i in self.item_ids]
+        if self.opts["items_kinematic"]:
+            for p in self.item_paths:
+                a = stage.GetPrimAtPath(p).GetAttribute("physics:kinematicEnabled")
+                if a and a.IsValid():
+                    a.Set(True)
+        self.nonvisual_fixes = normalize_nonvisual_tokens(stage) if self.opts["normalize_nonvisual"] else []
+        self.base_path = find_articulation_root(stage, ROBOT_PRIM)
         World = world_cls()
-        self.world = World(stage_units_in_meters=1.0, physics_dt=1.0 / self.physics_hz, rendering_dt=self._dt)
-        self.substeps = max(1, int(round(self.physics_hz * self._dt)))
-        self.robot = RobotController("/World/Robot", rig, cfg)
+        if hasattr(World, "clear_instance"):
+            World.clear_instance()      # World is a singleton: drop the previous episode's instance
+        self.world = World(stage_units_in_meters=1.0, physics_dt=1.0 / self.physics_hz, rendering_dt=self._dt,
+                           physics_prim_path=PHYSICS_SCENE)      # reuse the authored scene, no second one
+        self.substeps = max(1, int(round(self.physics_hz * self._dt)))   # executed inside World.step
+        base = self.base_path
+        self.robot = RobotController(base, rig, cfg)
+        imu_cfg = phys.get("imu", {})
+        bump = phys.get("contact", {}).get("bumper", {})
+        self.imu = ImuAdapter(f"{base}/imu_link", float(imu_cfg.get("rate_hz", 100)),
+                              int(imu_cfg.get("linear_acceleration_filter_size", 4)))
+        self.contact = ContactAdapter(base, float(bump.get("radius_m", 0.3)), float(bump.get("threshold_n", 1.0)))
         self.world.reset()
         self.robot.initialize()
+        self.imu.initialize()
+        self.contact.initialize()
         self.rp = RobotParams(cfg)
+        frac = float(ep.streams["robot"].uniform(*cfg.get("robot", {}).get("battery_start_frac", [0.55, 0.95])))
+        self.robot.battery_wh = self.rp.battery_wh * frac      # same draw as LiteBackend.reset
+        self.battery = self.robot.battery_wh
         sc = cfg.get("sensors", {})
         self.rates = {"lidar": 5.0, "camera": 5.0, "radar": 10.0, "landmarks": 5.0, "acoustic": 2.0}
         self.rates.update(sc.get("rates_hz", {}))
         self._last = {k: -1e9 for k in self.rates}
-        base = "/World/Robot/base_link"
-        self.lidar = RtxLidarAdapter(f"{base}/lidar_link")
-        self.radar = RtxRadarAdapter(f"{base}/radar_link")
-        self.camera = CameraAdapter(f"{base}/camera_link/rgb", detector=self.detector, rng=ep.streams["sensors"])
+        frames = rig.get("frames", {})
+        lc = sc.get("lidar", {})
+        self.lidar = RtxLidarAdapter(f"{base}/lidar_link", mount_height=float(lc.get("mount_height", 0.9)),
+                                     az_res_deg=float(lc.get("az_res_deg", 2.0)),
+                                     max_range=float(lc.get("max_range", 20.0)))
+        rx = frames.get("radar_link", {}).get("xyz", [0.25, 0.0, 0.6])
+        self.radar = RtxRadarAdapter(f"{base}/radar_link", mount_offset=(float(rx[0]), float(rx[1]), 0.0))
+        items_info = {i.id: {"cls": i.cls, "size": tuple(i.size), "glare": float(ep.materials[i.material].glare),
+                             "tag_readable": bool(i.tag_readable), "prim": p}
+                      for i, p in zip(spec.items, self.item_paths)}
+        self.camera = CameraAdapter(f"{base}/camera_link/rgb", detector=self.detector, items=items_info,
+                                    rng=ep.streams["sensors"], sensor_cfg=sc.get("camera", {}), nuisance=spec.nuisance)
         self.acoustic = AcousticAdapter(f"{base}/acoustic_link")
-        self.imu = ImuAdapter(f"{base}/imu_link")
-        self.contact = ContactAdapter(base)
-        self.landmarks = LandmarkAdapter({lm.id: lm.position for lm in ep.spec.landmarks})
+        self.landmarks = LandmarkAdapter({lm.id: lm.position for lm in spec.landmarks})
         self.rng = ep.streams["sensors"]
-        self.actual = StaffPopulation(ep.spec, ep.workflow.staff_tasks, ep.streams, True, cfg.get("agents"))
-        self.shadow = StaffPopulation(ep.spec, ep.workflow.staff_tasks, ep.streams, False, cfg.get("agents"))
-        self.staff = StaffDriver(self.actual.names(), self.staff_mode)
-        XP = xform_prim_cls()
-        self.items = {i.id: XP(f"/World/Items/{i.id}") for i in ep.spec.items}
-        self.base_prim = XP(base)
-        self.item_slot = dict(ep.workflow.initial)
-        self._truth_ptr = 0
-        self._wf_ptr = 0
+        self.actual = StaffPopulation(spec, ep.workflow.staff_tasks, ep.streams, True, cfg.get("agents"))
+        self.shadow = StaffPopulation(spec, ep.workflow.staff_tasks, ep.streams, False, cfg.get("agents"))
+        self.staff = StaffDriver(self.actual.names(), self.staff_mode, roles={s.name: s.role for s in spec.staff})
+        self.items = XformGroup(self.item_paths)
+        self._imageable = {iid: UsdGeom.Imageable(stage.GetPrimAtPath(p)) for iid, p in zip(self.item_ids,
+                                                                                             self.item_paths)}
+        self.base_prim = XformGroup([base])
+        self.offsets = item_offsets(ep)
+        self.custody = CustodyTimeline(ep.workflow)
+        self.custody.advance(0.0)
+        self.item_slot = self.custody.slots
         self._pending_wf = sorted(ep.workflow.log, key=lambda e: e.t)
         self._wf_latency = {e.event_id: float(ep.streams["workflow"].uniform(0.2, 2.0)) for e in self._pending_wf}
+        self._wf_ptr = 0
         self._acoustic_target = None
-        self._prev_v = 0.0
         self._seq = 0
-        self._place_items()
+        self._place_items(force=True)
+        for hook in type(self).reset_hooks:
+            hook(self)
         return self._sense()
 
     # ------------------------------------------------------------------
     def _pose(self) -> np.ndarray:
-        if hasattr(self.base_prim, "get_world_poses"):
+        try:
+            return self.robot.world_pose()
+        except Exception:   # physics view not ready: read the USD/Fabric pose of the base link
+            from medortrace.isaac.robot import yaw_from_quat_wxyz
             p, q = self.base_prim.get_world_poses()
-            p, q = np.asarray(p)[0], np.asarray(q)[0]
-        else:
-            p, q = self.base_prim.get_world_pose()
-        w, x, y, z = q
-        yaw = np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-        return np.array([p[0], p[1], yaw])
+            return np.array([p[0, 0], p[0, 1], yaw_from_quat_wxyz(q[0])])
 
-    def _slot_pos(self, sid: str) -> np.ndarray:
-        s = self.episode.spec.slot(sid)
-        if s.kind == "hand":
-            a = self.actual.get(s.anchor)
-            toward = self.episode.spec.object("or_table").box.center[:2] - a.pos
-            toward /= np.linalg.norm(toward) + 1e-9
-            return np.array([*(a.pos + 0.3 * toward), 1.0])
-        return s.position
+    def _staff_xy(self) -> dict[str, np.ndarray]:
+        return {a.spec.name: a.pos for a in self.actual.agents}
 
-    def _place_items(self) -> None:
-        for iid, prim in self.items.items():
+    def item_position(self, iid: str) -> np.ndarray:
+        return item_position(self.episode.spec, iid, self.item_slot[iid], self.offsets, self._staff_xy())
+
+    def _place_items(self, changed: list[str] | tuple = (), force: bool = False) -> None:
+        spec = self.episode.spec
+        idx, centers = [], []
+        for k, iid in enumerate(self.item_ids):
             sid = self.item_slot[iid]
-            p = np.array([0.0, 0.0, -5.0]) if sid == "elsewhere" else self._slot_pos(sid) + np.array([0, 0, 0.02])
-            q = np.array([1.0, 0, 0, 0])
-            if hasattr(prim, "set_world_poses"):
-                prim.set_world_poses(positions=p[None], orientations=q[None])
-            else:
-                prim.set_world_pose(position=p, orientation=q)
+            in_hand = sid != "elsewhere" and spec.slot(sid).kind == "hand"
+            if not (force or in_hand or iid in changed):
+                continue
+            support = self.item_position(iid)
+            idx.append(k)
+            centers.append(item_prim_center(spec, iid, support))
+            if force or iid in changed:
+                if np.all(np.isfinite(support)):
+                    self._imageable[iid].MakeVisible()
+                else:
+                    self._imageable[iid].MakeInvisible()
+        if idx:
+            q = np.tile([1.0, 0.0, 0.0, 0.0], (len(idx), 1))
+            self.items.set_world_poses(np.array(centers), q, indices=idx)
 
     def step(self, cmd: VelocityCommand) -> SensorBundle:
         dt = self._dt
-        self.robot.command(cmd.v, cmd.omega, dt)
+        if self.drive == "internal":
+            self.robot.command(cmd.v, cmd.omega, dt)
         pose = self._pose()
-        rv = self.robot.v_cmd * np.array([np.cos(pose[2]), np.sin(pose[2])])
+        v_meas, _ = self.robot.measured_twist()
+        rv = v_meas * np.array([np.cos(pose[2]), np.sin(pose[2])])
         self.actual.step(self._t, dt, pose[:2], rv)
         self.shadow.step(self._t, dt, None, None)
-        self.staff.apply(self.actual.positions(), np.array([a.heading for a in self.actual.agents]))
-        truth = self.episode.workflow.truth
-        while self._truth_ptr < len(truth) and truth[self._truth_ptr].t <= self._t + dt:
-            m = truth[self._truth_ptr]
-            self.item_slot[m.item_id] = m.dst
-            self._truth_ptr += 1
-        self._place_items()
-        for k in range(self.substeps):
-            self.world.step(render=(k == self.substeps - 1))
+        vel = self.actual.velocities()
+        self.staff.apply(self.actual.positions(), np.array([a.heading for a in self.actual.agents]),
+                         np.linalg.norm(vel, axis=1) if len(vel) else None)
+        changed = self.custody.advance(self._t + dt)
+        self._place_items(changed)
+        self.world.step(render=True)
         self._t += dt
         self._acoustic_target = cmd.acoustic_probe_target
         self.battery = self.robot.update_energy(dt, self.rp.p_acoustic_w if cmd.acoustic_probe_target else 0.0)
@@ -178,7 +267,7 @@ class IsaacBackend(SimBackend):
         if self._due("lidar") and not fm.dropped("lidar", t):
             b.lidar = self.lidar.read(t, stamp)
         if self._due("camera") and not fm.dropped("camera", t):
-            b.camera = self.camera.read(t, stamp, np.deg2rad(-25.0))
+            b.camera = self.camera.read(t, stamp)
         if self._due("radar") and not fm.dropped("radar", t):
             b.radar = self.radar.read(t, stamp)
         if self._acoustic_target and self._due("acoustic") and not fm.dropped("acoustic", t):
@@ -187,7 +276,8 @@ class IsaacBackend(SimBackend):
                 ids = {s.id for s in slots}
                 contents = [ep.materials[i.material].acoustic_reflectivity for i in ep.spec.items
                             if self.item_slot[i.id] in ids]
-                anchor = ep.spec.object(slots[0].anchor) if slots[0].anchor in [o.name for o in ep.spec.objects] else None
+                names = {o.name for o in ep.spec.objects}
+                anchor = ep.spec.object(slots[0].anchor) if slots[0].anchor in names else None
                 base_r = ep.materials[anchor.material].acoustic_reflectivity if anchor else 0.5
                 b.acoustic = self.acoustic.read(t, stamp, np.array([pose[0], pose[1], 1.2]), self._acoustic_target,
                                                 slots[0].position, base_r, contents, self.rng)
@@ -197,23 +287,17 @@ class IsaacBackend(SimBackend):
             b.imu = self.imu.read(t, stamp)
         if not fm.dropped("odom", t):
             vb, wb = fm.odom_bias if t >= fm.odom_bias_start else (0.0, 0.0)
-            try:
-                jv = np.asarray(self.robot.art.get_joint_velocities()).reshape(-1)
-                d = self.robot._dof
-                wl, wr = jv[d.get("left_wheel_joint", 0)], jv[d.get("right_wheel_joint", 1)]
-                v = self.robot.r * (wl + wr) / 2
-                w = self.robot.r * (wr - wl) / self.robot.b
-            except Exception:
-                v, w = self.robot.v_cmd, self.robot.w_cmd
+            v, w = self.robot.measured_twist()
             self._seq += 1
             b.odom = WheelOdometry(Header(stamp("odom", t), t, "base_link", self._seq),
-                                   v * (1 + vb) + float(self.rng.normal(0, 0.01)), w + wb + float(self.rng.normal(0, 0.005)))
-        b.contact = self.contact.read(t, stamp, self.robot.efforts())
+                                   v * (1 + vb) + float(self.rng.normal(0, 0.01)),
+                                   w + wb + float(self.rng.normal(0, 0.005)))
+        b.contact = self.contact.read(t, stamp, self.robot.arm_efforts())
         while self._wf_ptr < len(self._pending_wf) and \
                 self._pending_wf[self._wf_ptr].t + self._wf_latency[self._pending_wf[self._wf_ptr].event_id] <= t:
             b.workflow.append(self._pending_wf[self._wf_ptr])
             self._wf_ptr += 1
-        b.battery_wh = getattr(self, "battery", self.rp.battery_wh)
+        b.battery_wh = self.battery
         return b
 
     def truth(self) -> TruthSnapshot:
@@ -221,15 +305,16 @@ class IsaacBackend(SimBackend):
         pose = self._pose()
         ap = self.actual.positions()
         d = np.linalg.norm(ap - pose[:2], axis=1) if len(ap) else np.array([10.0])
-        c = self.contact.s.get_current_frame() if hasattr(self, "contact") else {}
+        c = self.contact.frame()
+        near_agent = bool(np.min(d) < self.rp.radius + 0.35)
         return TruthSnapshot(
-            t=self._t, robot_pose=pose, robot_vel=np.array([self.robot.v_cmd, self.robot.w_cmd]),
+            t=self._t, robot_pose=pose, robot_vel=np.array(self.robot.measured_twist()),
             agent_names=self.actual.names(), agent_pos=ap.copy(), agent_vel=self.actual.velocities().copy(),
             shadow_pos=self.shadow.positions().copy(), item_slots=dict(self.item_slot),
-            item_pos={i: self._slot_pos(s) if s != "elsewhere" else np.full(3, np.nan) for i, s in self.item_slot.items()},
+            item_pos={i: self.item_position(i) for i in self.item_ids},
             collision_agent=bool(np.min(d) < self.rp.radius + 0.25),
-            collision_static=bool(c.get("in_contact", False)) and not bool(np.min(d) < self.rp.radius + 0.35),
-            contact_force=float(c.get("force", 0.0)), battery_wh=float(getattr(self, "battery", 0.0)),
+            collision_static=bool(c.get("in_contact", False)) and not near_agent,
+            contact_force=float(c.get("force", 0.0)), battery_wh=float(self.battery),
             energy_used_wh=float(self.robot.energy_used),
             in_keepout=bool(ep.spec.in_keepout(pose[None, :2], extra=-ep.spec.sterile_zones[0].keepout_margin)[0]),
             fault_active=ep.faults.active(self._t))
@@ -237,4 +322,7 @@ class IsaacBackend(SimBackend):
     def close(self) -> None:
         if self.world is not None:
             self.world.stop()
-        _ = wrap_angle  # keep import (used by subclasses)
+            World = type(self.world)
+            if hasattr(World, "clear_instance"):
+                World.clear_instance()
+            self.world = None
