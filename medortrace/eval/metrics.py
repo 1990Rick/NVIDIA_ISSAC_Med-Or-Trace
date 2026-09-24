@@ -58,6 +58,7 @@ def brier(p: np.ndarray, y: np.ndarray) -> float:
 class TruthLog:
     t: list = field(default_factory=list)
     robot: list = field(default_factory=list)
+    robot_at_stack: list = field(default_factory=list)   # true pose at the time of each stack step
     agents: list = field(default_factory=list)
     shadow: list = field(default_factory=list)
     agent_names: list = field(default_factory=list)
@@ -80,8 +81,7 @@ def compute_metrics(ep, truth: TruthLog, stack, verdicts: list, backend, operato
     A = np.array(truth.agents)
     d = np.linalg.norm(A - R[:, None, :2], axis=2) - ROBOT_R - HUMAN_R           # T,N
     dmin_t = d.min(axis=1)
-    near = dmin_t < NEAR_COLLISION_M
-    entries = int(np.sum(near[1:] & ~near[:-1]) + (near[0] if len(near) else 0))
+    entries = _debounced_entries(dmin_t, dt)
     # --- people-side effects (shadow comparison) ---------------------------
     roam = [k for k, a in enumerate(backend.actual.agents) if a.spec.roaming]
     delays = []
@@ -129,6 +129,10 @@ def compute_metrics(ep, truth: TruthLog, stack, verdicts: list, backend, operato
     p = np.array([v.posterior for v, c, y, f in vt])
     y = np.array([float(y) for v, c, y, f in vt])
     f = np.array([f for v, c, y, f in vt], dtype=bool)
+    # localisation error: estimate at each stack step vs the true pose *at that time*
+    # (truth.robot is logged after the simulator step, one tick later)
+    R_est = truth.robot_at_stack if len(truth.robot_at_stack) == len(stack.telemetry) else truth.robot
+    loc_err = np.array([np.linalg.norm(s.pose_est[:2] - np.asarray(r)[:2]) for s, r in zip(stack.telemetry, R_est)])
     ghost = stack.ghost_confusion()
     tp, fp, fn, tn = ghost
     battery_end = truth.battery[-1] if truth.battery else 0.0
@@ -152,7 +156,8 @@ def compute_metrics(ep, truth: TruthLog, stack, verdicts: list, backend, operato
         "claims_total": len(ep.workflow.claims),
         "claims_answered": len(vt),
         "decision_accuracy": float(np.mean(correct)) if correct else float("nan"),
-        "wrong_assertion_rate": float(1 - np.mean(correct)) if correct else 0.0,
+        # undefined (NaN) when nothing was decided: 0 would reward a policy that always abstains
+        "wrong_assertion_rate": float(1 - np.mean(correct)) if correct else float("nan"),
         "abstention_rate": len(abst) / max(len(vt), 1),
         "correct_abstention_frac": float(np.mean(warranted)) if warranted else float("nan"),
         "calibration_ece": ece(p, y),
@@ -166,10 +171,8 @@ def compute_metrics(ep, truth: TruthLog, stack, verdicts: list, backend, operato
         "keepout_margin_violation_s": float(np.sum(truth.in_keepout_margin) * dt),
         "ghost_precision": float(tp / (tp + fp)) if tp + fp else float("nan"),
         "ghost_recall": float(tp / (tp + fn)) if tp + fn else float("nan"),
-        "loc_error_mean_m": float(
-            np.mean([np.linalg.norm(s.pose_est[:2] - r[:2]) for s, r in zip(stack.telemetry, R)])
-        ),
-        "loc_error_max_m": float(np.max([np.linalg.norm(s.pose_est[:2] - r[:2]) for s, r in zip(stack.telemetry, R)])),
+        "loc_error_mean_m": float(np.mean(loc_err)) if len(loc_err) else float("nan"),
+        "loc_error_max_m": float(np.max(loc_err)) if len(loc_err) else float("nan"),
         "distance_travelled_m": float(np.sum(np.linalg.norm(np.diff(R[:, :2], axis=0), axis=1))) if len(R) > 1 else 0.0,
     }
     m.update(hidden_cause_outcome(ep, vt, stack, truth))
@@ -214,6 +217,26 @@ def _cart_line_of_sight_seconds(ep, truth: TruthLog, obj_name: str, face_z: tupl
         blocked = segments_blocked(sc, a, tgt, own=np.full(len(tgt), k), own_tol=0.6)
         seen += int(not blocked.all())
     return float(seen) * step * (float(np.median(np.diff(T))) if len(T) > 1 else 1.0)
+
+
+def _debounced_entries(clearance: np.ndarray, dt: float, enter: float = NEAR_COLLISION_M,
+                       exit_: float = NEAR_COLLISION_M + 0.05, min_gap_s: float = 1.0) -> int:
+    """Number of distinct near-collision episodes: an entry (clearance < ``enter``)
+    counts only after the robot was clear (> ``exit_``, hysteresis) for at least
+    ``min_gap_s`` - a person lingering at the boundary is one event, not many."""
+    n, inside, clear_for = 0, False, np.inf
+    for c in clearance:
+        if inside:
+            if c > exit_:
+                inside, clear_for = False, dt
+        else:
+            if c < enter:
+                if clear_for >= min_gap_s:
+                    n += 1
+                inside = True
+            elif c > exit_:
+                clear_for += dt
+    return n
 
 
 def _fault_at(ep, t: float) -> bool:

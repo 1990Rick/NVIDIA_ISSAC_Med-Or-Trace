@@ -21,7 +21,7 @@ from medortrace.autonomy.stack import AutonomyStack, stack_inputs_from_episode
 from medortrace.common.config import deep_merge
 from medortrace.common.msgs import VelocityCommand
 from medortrace.data.writer import TrajectoryWriter
-from medortrace.eval.metrics import TruthLog, compute_metrics
+from medortrace.eval.metrics import ROBOT_R, TruthLog, compute_metrics
 from medortrace.sim.episode import build_episode
 
 
@@ -96,13 +96,19 @@ def run_episode(cfg: dict, seed: int, backend: str = "lite", out_dir: str | Path
     dt = be.dt
     T = ep.workflow.duration
     cmd = VelocityCommand()
+    # true pose at the time of the bundle the stack consumes (for localisation error)
+    pose_now = np.asarray(be.truth().robot_pose, float) if hasattr(be, "truth") else None
+    robot_r = float(be.rp.radius) if hasattr(be, "rp") else ROBOT_R
     while be.t < T - 1e-9:
         cmd = stack.step(bundle, dt)
+        if pose_now is not None:
+            tl.robot_at_stack.append(pose_now)
         verdicts += stack.telemetry[-1].verdicts
         if writer:
             writer.add_raw(bundle.t, bundle)
         bundle = be.step(cmd)
         tr = be.truth()
+        pose_now = np.asarray(tr.robot_pose, float)
         op.step(be.t, stack, tr.robot_pose)
         tl.t.append(tr.t)
         tl.robot.append(tr.robot_pose)
@@ -112,7 +118,8 @@ def run_episode(cfg: dict, seed: int, backend: str = "lite", out_dir: str | Path
         tl.collision_agent.append(tr.collision_agent)
         tl.collision_static.append(tr.collision_static)
         tl.in_keepout.append(tr.in_keepout)
-        tl.in_keepout_margin.append(bool(ep.spec.in_keepout(tr.robot_pose[None, :2])[0]))
+        # AORN margin: the robot's *body* must stay keepout_margin away from the sterile field
+        tl.in_keepout_margin.append(bool(ep.spec.in_keepout(tr.robot_pose[None, :2], extra=robot_r)[0]))
         tl.battery.append(tr.battery_wh)
         tl.energy.append(tr.energy_used_wh)
         tl.item_slots.append(tr.item_slots)

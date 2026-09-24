@@ -101,6 +101,7 @@ class ItemBelief:
         self.else_idx = self.sidx.get("elsewhere")
         self.dist = np.linalg.norm(pos[:, None] - pos[None], axis=2)
         self.records: list[EvidenceRecord] = []
+        self.records_base = 0          # absolute index of records[0] (older records were trimmed)
 
     # ------------------------------------------------------------------
     def update_hand_positions(self, hand_xy: dict[str, np.ndarray]) -> None:
@@ -269,10 +270,23 @@ class ItemBelief:
         st.b = self._norm(np.exp(lb))
         for k in np.where(observed)[0]:
             st.last_direct_obs_t[int(k)] = t
-        if np.max(np.abs(llr)) > 0.05:
+        # every applied update is recorded: the verifier re-derives its smoothed
+        # posterior from these records, so dropping small (e.g. decorrelated
+        # negative) updates would bias it towards the large positive ones
+        if np.max(np.abs(llr)) > 1e-6:
             self.records.append(EvidenceRecord(eid, t, sensor, st.spec.id, llr.copy()))
-            if len(self.records) > 20000:
-                self.records = self.records[-10000:]
+            if len(self.records) > self.MAX_RECORDS:
+                drop = len(self.records) - self.KEEP_RECORDS
+                self.records = self.records[drop:]
+                self.records_base += drop
+
+    MAX_RECORDS = 200_000
+    KEEP_RECORDS = 150_000     # > the records of any open claim's window (count grace x update rate)
+
+    def records_since(self, abs_index: int) -> tuple[list[EvidenceRecord], int]:
+        """Records with absolute index >= ``abs_index`` and the next absolute index."""
+        start = max(0, abs_index - self.records_base)
+        return self.records[start:], self.records_base + len(self.records)
 
     def _norm(self, b: np.ndarray) -> np.ndarray:
         b = np.maximum(b, self.FLOOR)

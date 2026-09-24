@@ -43,6 +43,7 @@ class OpenClaim:
     moved: bool = False
     moved_t: float = float("inf")
     superseded: bool = False      # item reported moved on before t_ref (transient state)
+    slot_abs: float = 0.0         # total |LLR| of sensor evidence about the claimed slot
     contributions: dict[str, float] = field(default_factory=dict)
 
 
@@ -62,6 +63,7 @@ class VerdictRecord:
 
 
 class ClaimVerifier:
+    MIN_DIRECT_LLR = 0.05         # total |LLR| about the claimed slot that counts as having looked
     def __init__(self, belief: ItemBelief, prov: ProvenanceGraph, tau_verify: float = 0.9,
                  tau_refute: float = 0.1, require_direct_evidence: bool = True, early_decision: bool = True):
         self.belief = belief
@@ -94,12 +96,15 @@ class ClaimVerifier:
             elif oc.claim.kind == "handoff":
                 oc.superseded = True
 
+    def supersede(self, claim_id: str) -> None:
+        if claim_id in self.open:
+            self.open[claim_id].superseded = True
+
     def pending(self) -> list[Claim]:
         return [oc.claim for oc in self.open.values()]
 
     def step(self, t: float) -> list[VerdictRecord]:
         out = []
-        recs = self.belief.records
         for cid in list(self.open):
             oc = self.open[cid]
             c = oc.claim
@@ -108,30 +113,39 @@ class ClaimVerifier:
                 out.append(self._close(cid, oc, t, Verdict.ABSTAIN,
                                        "superseded: item reported moved again before t_ref", p_now, None))
                 continue
+            if c.item_id not in self.belief.items or c.slot_id not in self.belief.sidx:
+                # not on the robot's count sheet / not a surveyed slot: nothing can be checked
+                what = "item not on the count sheet" if c.item_id not in self.belief.items else "unknown slot"
+                out.append(self._close(cid, oc, t, Verdict.ABSTAIN, f"{what}: {c.item_id}@{c.slot_id}",
+                                       float("nan"), None))
+                continue
             if t < c.t_ref:
                 continue
-            k = self.belief.sidx.get(c.slot_id)
-            if k is None:
-                continue
+            k = self.belief.sidx[c.slot_id]
             st = self.belief.items[c.item_id]
             if oc.snapshot is None:
                 oc.snapshot = st.b.copy()
                 oc.acc_llr = np.zeros_like(st.b)
-                oc.rec_ptr = len(recs)
-            # accumulate sensor evidence recorded since t_ref
-            for r in recs[oc.rec_ptr:]:
+                _, oc.rec_ptr = self.belief.records_since(0)
+            # accumulate sensor evidence recorded since t_ref (absolute record indices)
+            recs, nxt = self.belief.records_since(oc.rec_ptr)
+            for r in recs:
                 if r.item_id != c.item_id or r.sensor == "workflow" or r.t > oc.moved_t:
                     continue
                 oc.acc_llr += r.llr
                 # a tag read is recorded as "<frame>:tag" but only the camera frame is a provenance node
                 eid = r.evidence_id.removesuffix(":tag") if r.sensor == "camera_tag" else r.evidence_id
-                if abs(r.llr[k]) > 0.05:
-                    oc.direct = True
+                if r.llr[k] != 0.0:
+                    oc.slot_abs += abs(float(r.llr[k]))
                     oc.contributions[eid] = oc.contributions.get(eid, 0.0) + float(r.llr[k])
                 if r.sensor == "camera_tag" and r.llr.max() > 1.0:
                     oc.direct = True
                     oc.contributions[eid] = oc.contributions.get(eid, 0.0) + float(r.llr[k] - r.llr.max())
-            oc.rec_ptr = len(recs)
+            # direct evidence: the claimed slot was actually observed (a meaningful
+            # total of sensor evidence about it, however it was spread over frames)
+            if oc.slot_abs > self.MIN_DIRECT_LLR:
+                oc.direct = True
+            oc.rec_ptr = nxt
             # fixed-lag smoothing: snapshot at t_ref x evidence gathered until the
             # item was next reported moved (later evidence is about a different state)
             lb = np.log(oc.snapshot) + oc.acc_llr
@@ -148,13 +162,18 @@ class ClaimVerifier:
                     decided = (Verdict.VERIFIED, "posterior above verify threshold with direct evidence")
                 elif p <= tau_r and (support < 0.0 or not self.require_direct):
                     decided = (Verdict.REFUTED, "posterior below refute threshold with direct evidence")
-            if decided is None and t >= c.t_due:
+            # the item was reported moved on: evidence gathered after moved_t is about a
+            # different state, so nothing can change this claim any more - decide now
+            frozen = oc.moved and t >= oc.moved_t
+            if decided is None and (t >= c.t_due or frozen):
                 if not oc.direct:
                     reason = "no direct sensor evidence of the claimed slot"
                 elif (p >= tau_v and support <= 0.0) or (p <= tau_r and support >= 0.0):
                     reason = f"direct evidence disagrees with the smoothed posterior (p={p:.2f})"
                 else:
                     reason = f"ambiguous evidence (p={p:.2f})"
+                if frozen and t < c.t_due:
+                    reason = "item reported moved on before the evidence was conclusive; " + reason
                 decided = (Verdict.ABSTAIN, reason)
             if decided is None or (not self.early and t < c.t_due):
                 continue
@@ -180,7 +199,7 @@ class ClaimVerifier:
         u: dict[str, float] = {}
         for oc in self.open.values():
             c = oc.claim
-            if t < c.t_ref - 10.0:
+            if t < c.t_ref - 10.0 or oc.moved or oc.superseded:
                 continue
             slack = max(1.0, c.t_due - t)
             w = (2.0 if not oc.direct else 0.7) * (10.0 / slack + 0.5)
@@ -191,7 +210,7 @@ class ClaimVerifier:
         u: dict[str, float] = {}
         for oc in self.open.values():
             c = oc.claim
-            if t < c.t_ref - 10.0 or oc.direct:
+            if t < c.t_ref - 10.0 or oc.direct or oc.moved or oc.superseded:
                 continue
             u[c.slot_id] = u.get(c.slot_id, 0.0) + 10.0 / max(1.0, c.t_due - t)
         return u

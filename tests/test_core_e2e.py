@@ -18,7 +18,8 @@ from medortrace.eval.runner import run_episode
 SEED = 123
 DURATION = 15.0
 # metrics that are legitimately NaN in a 15 s nominal episode (no decided claims / no ghosts / no faults)
-MAY_BE_NAN = {"decision_accuracy", "correct_abstention_frac", "calibration_ece_under_fault", "calibration_ece",
+MAY_BE_NAN = {"decision_accuracy", "wrong_assertion_rate", "correct_abstention_frac", "calibration_ece_under_fault",
+              "calibration_ece",
               "calibration_ece_nominal", "brier", "ghost_precision", "ghost_recall"}
 
 

@@ -8,9 +8,20 @@ reachable, not crowding people) is scored as
     V(c) = w_eig    * sum_i crit_i * urgency_i * EIG_i(c)       (item custody)
          + w_modal  * EIG over hidden slots via radar/acoustic  (non-visual)
          + w_unc    * uncertainty mass in the camera frustum     (map)
+         + w_watch  * sum_s lambda_s * pd_s(c)                   (anticipation)
          - w_path   * path length  - w_turn * |heading change|
-         - w_risk   * human-proximity risk at the viewpoint
+         - w_risk   * human-proximity risk at the viewpoint (now)
+         - w_traffic* staff traffic density at the viewpoint (time-averaged)
          - w_sterile* proximity to the sterile boundary
+
+The anticipation term values viewpoints that keep the slots where the next
+hand-offs are likely in view: lambda_s is the expected rate of logged events at
+slot s (a workflow prior decayed towards the rate observed in the log so far,
+maintained by the stack) and pd_s(c) the predicted detection probability from
+the candidate.  Without it the planner is myopic - it chases open claims and
+is not in position when the next hand-off happens (a parked camera with an
+overview of the field then verifies more hand-offs).  Overview candidates on a
+ring around the activity centroid are added to the sampled viewpoints.
 
 EIG_i is the exact expected entropy reduction of item i's categorical belief
 for a binary detect / no-detect outcome at each visible slot (summed over
@@ -31,7 +42,8 @@ from medortrace.planning.costmap import Costmap
 from medortrace.planning.grid import dijkstra_field, extract_path, nearest_free, smooth_path
 
 DEFAULT_WEIGHTS = {"w_eig": 4.0, "w_modal": 2.0, "w_unc": 0.02, "w_path": 0.5, "w_turn": 0.15,
-                   "w_risk": 2.0, "w_sterile": 0.5, "w_urgent": 3.0, "w_commit": 1.0}
+                   "w_risk": 2.0, "w_sterile": 0.5, "w_urgent": 3.0, "w_commit": 1.0, "w_watch": 1.5,
+                   "w_traffic": 3.0}
 
 
 @dataclass
@@ -76,10 +88,12 @@ class NextBestView:
         self.n_t = n_per_target
         self.n_e = n_explore
         self.modalities = set(modalities)
+        self.person_gate = 1.1          # m, centre-to-centre
 
     def plan(self, pose: np.ndarray, belief: ItemBelief, occ: OccupancyBelief, cm: Costmap,
              people_xy: np.ndarray, urgency_items: dict[str, float], urgent_slots: dict[str, float],
-             rng: np.random.Generator, haze: float = 0.0, incumbent: "ViewGoal | None" = None) -> ViewGoal | None:
+             rng: np.random.Generator, haze: float = 0.0, incumbent: "ViewGoal | None" = None,
+             activity: dict[str, float] | None = None, traffic: np.ndarray | None = None) -> ViewGoal | None:
         slots = belief.slots
         S = len(slots)
         item_ids = list(belief.items)
@@ -120,6 +134,20 @@ class NextBestView:
                 off = rng.normal(0, 1.0, 2)
                 q = p + off
                 cands.append((q, np.arctan2(p[1] - q[1], p[0] - q[0]), None))
+        lam = np.zeros(S)
+        for sid, rate in (activity or {}).items():
+            if sid in belief.sidx:
+                lam[belief.sidx[sid]] = rate
+        if lam.sum() > 0:
+            # overview viewpoints on a ring around the activity centroid, facing it
+            pos = np.array([s.position[:2] if np.all(np.isfinite(s.position[:2])) else [np.nan, np.nan]
+                            for s in slots])
+            ok = np.isfinite(pos[:, 0]) & (lam > 0)
+            ctr = (lam[ok, None] * pos[ok]).sum(0) / lam[ok].sum()
+            for a in np.linspace(-np.pi, np.pi, 8, endpoint=False) + rng.uniform(0, np.pi / 4):
+                for rr in (2.2, 2.8):
+                    q = ctr + rr * np.array([np.cos(a), np.sin(a)])
+                    cands.append((q, float(np.arctan2(ctr[1] - q[1], ctr[0] - q[0])), None))
         cands.append((pose[:2].copy(), pose[2], None))            # staying is always an option
         inc_idx = None
         if incumbent is not None:
@@ -135,7 +163,9 @@ class NextBestView:
                 continue
             if cm.lookup(p[None], "lethal")[0] or cm.lookup(p[None], "edt")[0] < self.r + 0.1:
                 continue
-            if len(people_xy) and np.min(np.linalg.norm(people_xy - p, axis=1)) < 0.9:
+            # a viewpoint must not put the robot inside the supervisor's hard human-
+            # clearance limit (0.45 m surface-to-surface = 0.98 m centre-to-centre)
+            if len(people_xy) and np.min(np.linalg.norm(people_xy - p, axis=1)) < self.person_gate:
                 continue
             adm.append((p, yaw, k, is_inc))
         if not adm:
@@ -161,6 +191,7 @@ class NextBestView:
                 pdm = np.zeros((len(item_ids), S))
             eig = expected_info_gain(B, pdm)
             v_eig = float((crit * urg * eig).sum())
+            v_watch = float((lam * pdm.max(axis=0)).sum()) if lam.any() else 0.0
             # non-visual modalities for hidden slots (radar/acoustic: metallic only)
             pdx = np.zeros((len(item_ids), S))
             probe = None
@@ -181,22 +212,32 @@ class NextBestView:
             risk = 0.0
             if len(people_xy):
                 dmin = np.min(np.linalg.norm(people_xy - p, axis=1))
-                risk = float(np.exp(-(dmin - 0.9) / 0.4))
+                risk = float(np.exp(-(dmin - self.person_gate) / 0.4))
                 # straight-line corridor to the viewpoint passing close to people
                 seg = np.linspace(pose[:2], p, 8)
                 dpath = np.min(np.linalg.norm(seg[:, None, :] - people_xy[None], axis=2))
                 risk += float(np.exp(-(dpath - 0.7) / 0.3))
+            # expected staff presence at the viewpoint over the recent past: a robot
+            # parked in a walkway is approached and forces people around it
+            traffic_at = 0.0
+            if traffic is not None:
+                ci = cm.grid.world_to_cell(p[None])[0]
+                if 0 <= ci[0] < traffic.shape[0] and 0 <= ci[1] < traffic.shape[1]:
+                    traffic_at = float(min(traffic[ci[0], ci[1]], 1.0))
             dz = float(cm.lookup(p[None], "zone_dist")[0])
             sterile_pen = float(np.exp(-(dz - 0.5) / 0.3))
             score = (self.w["w_eig"] * v_eig + self.w["w_modal"] * v_modal + self.w["w_unc"] * v_unc
+                     + self.w.get("w_watch", 0.0) * v_watch
                      - self.w["w_path"] * plen - self.w["w_turn"] * turn - self.w["w_risk"] * risk
+                     - self.w.get("w_traffic", 0.0) * traffic_at
                      - self.w["w_sterile"] * sterile_pen) + (self.w["w_commit"] if is_inc else 0.0)
             if best is None or score > best.score:
                 best_goal_cell = goal
                 best = ViewGoal(np.array([p[0], p[1], yaw]), np.zeros((0, 2)), score,
                                 slots[k].id if k is not None else None,
                                 probe if v_modal > 1e-3 else None,
-                                {"eig": v_eig, "modal": v_modal, "unc": v_unc, "path": plen, "risk": risk,
+                                {"eig": v_eig, "modal": v_modal, "unc": v_unc, "watch": v_watch, "path": plen,
+                                 "risk": risk, "traffic": traffic_at,
                                  "sterile": sterile_pen})
         if best is not None:
             cells = extract_path(parent, best_goal_cell)

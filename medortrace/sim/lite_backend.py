@@ -346,6 +346,8 @@ class LiteBackend(SimBackend):
             item_slots=dict(self.item_slot), item_pos={i.id: self.item_position(i.id) for i in ep.spec.items},
             collision_agent=self.collision_agent, collision_static=self.collision_static,
             contact_force=self.contact_force, battery_wh=self.battery, energy_used_wh=self.energy_used,
-            in_keepout=bool(ep.spec.in_keepout(self.pose[None, :2], extra=-ep.spec.sterile_zones[0].keepout_margin)[0]),
+            # breach: any part of the robot's footprint over the sterile field
+            in_keepout=bool(ep.spec.in_keepout(self.pose[None, :2],
+                                               extra=self.rp.radius - ep.spec.sterile_zones[0].keepout_margin)[0]),
             fault_active=ep.faults.active(self._t),
         )

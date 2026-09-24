@@ -344,7 +344,9 @@ class IsaacBackend(SimBackend):
             collision_static=bool(c.get("in_contact", False)) and not near_agent,
             contact_force=float(c.get("force", 0.0)), battery_wh=float(self.battery),
             energy_used_wh=float(self.robot.energy_used),
-            in_keepout=bool(ep.spec.in_keepout(pose[None, :2], extra=-ep.spec.sterile_zones[0].keepout_margin)[0]),
+            # breach: any part of the robot's footprint over the sterile field
+            in_keepout=bool(ep.spec.in_keepout(pose[None, :2],
+                                               extra=self.rp.radius - ep.spec.sterile_zones[0].keepout_margin)[0]),
             fault_active=ep.faults.active(self._t))
 
     def close(self) -> None:

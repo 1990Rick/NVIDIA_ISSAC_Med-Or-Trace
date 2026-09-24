@@ -41,7 +41,7 @@ from medortrace.perception.frontend import CLASSES, CameraFrontEnd, LidarFrontEn
 from medortrace.perception.sync import PoseHistory, TimeSyncMonitor
 from medortrace.perception.visibility import VisibilityModel
 from medortrace.planning.costmap import Costmap
-from medortrace.planning.mpc import MppiController
+from medortrace.planning.mpc import MppiController, lookahead_point
 from medortrace.planning.nbv import NextBestView
 from medortrace.planning.routes import fixed_route, passive_vantage
 from medortrace.provenance.graph import ProvenanceGraph
@@ -95,6 +95,7 @@ class StepTelemetry:
 
 class AutonomyStack:
     SUSPECT_HOLD_S = 15.0      # displaced-anchor cue: withhold negative camera evidence this long
+    TRAFFIC_RADIUS = 0.45      # m: a person this close to a cell "uses" it
 
     def __init__(self, inputs: StackInputs, cfg: dict):
         self.cfg = cfg
@@ -148,6 +149,20 @@ class AutonomyStack:
         self.diag = ChangeDiagnoser(inp.prior_map)
         self._movable = {o.name for o in inp.prior_map if o.movable}
         self._suspect_slot_t: dict[int, float] = {}   # slot index -> last displaced-anchor cue
+        # workflow activity model for anticipatory viewing (events per minute per slot):
+        # a surgical-workflow prior, and the rate observed in the log so far
+        self.activity_prior = np.array([self._activity_prior(s) for s in inp.slots])
+        self.activity = self.activity_prior.copy()
+        self.activity_tau = float(a.get("activity_tau_s", 120.0))
+        # staff traffic map: time-averaged indicator "a tracked person within
+        # TRAFFIC_RADIUS of this cell" (exponential window traffic_tau), used to keep
+        # the robot's viewpoints out of walkways
+        self.traffic = np.zeros(self.occ.grid2d.shape, dtype=np.float32)
+        self.traffic_tau = float(a.get("traffic_tau_s", 120.0))
+        rr = int(np.ceil(self.TRAFFIC_RADIUS / self.occ.res))
+        di, dj = np.meshgrid(np.arange(-rr, rr + 1), np.arange(-rr, rr + 1), indexing="ij")
+        disk = (di ** 2 + dj ** 2) * self.occ.res ** 2 <= self.TRAFFIC_RADIUS ** 2
+        self._traffic_disk = np.stack([di[disk], dj[disk]], 1)
         self.vis = VisibilityModel(inp.prior_map, inp.slots, self.cam_cfg, inp.room[2])
         nbv_w = {}
         wpath = a.get("nbv_weights")
@@ -191,9 +206,36 @@ class AutonomyStack:
         self.metal_prior_idx = {o.name: i for i, o in enumerate(inp.prior_map)}
 
     # ==================================================================
+    @staticmethod
+    def _activity_prior(s) -> float:
+        """Prior hand-off rate (events/min) by slot role: the sterile field, mayo stand and
+        back table carry most hand-offs, kick buckets the discards; hands are transient."""
+        if s.kind in ("hand", "elsewhere") or s.hidden_from_camera:
+            return 0.0
+        if s.sterile:
+            return 0.5
+        if s.kind == "container":
+            return 0.3
+        return 0.1
+
+    def _update_traffic(self, people: list, dt: float) -> None:
+        a = np.float32(np.exp(-dt / self.traffic_tau))
+        self.traffic *= a
+        if not people:
+            return
+        g = self.occ.grid2d
+        cells = g.world_to_cell(np.asarray(people, float).reshape(-1, 2))
+        idx = (cells[:, None, :] + self._traffic_disk[None]).reshape(-1, 2)
+        ok = (idx[:, 0] >= 0) & (idx[:, 0] < g.shape[0]) & (idx[:, 1] >= 0) & (idx[:, 1] < g.shape[1])
+        np.add.at(self.traffic, (idx[ok, 0], idx[ok, 1]), np.float32(1.0 - a))
+
+    def activity_rates(self) -> dict[str, float]:
+        return {s.id: float(r) for s, r in zip(self.inp.slots, self.activity) if r > 1e-3}
+
     def step(self, b: SensorBundle, dt: float) -> VelocityCommand:
         self.t = t = b.t
         verdicts = []
+        self.activity = self.activity_prior + (self.activity - self.activity_prior) * np.exp(-dt / self.activity_tau)
         # ---------------- localisation ------------------------------------
         self.ekf.predict(b.odom, b.imu, dt)
         if b.landmarks is not None:
@@ -220,7 +262,8 @@ class AutonomyStack:
                 if self._lidar_frames % 2 == 0:   # 2.5 Hz scan-to-map consistency check
                     static = ~dyn & (lp.ghost_prob < 0.5)
                     dg = self.diag.observe(t, lp.points[static], lp.residual[static], p_meas,
-                                           self.lidar_fe.map_edt, self.lidar_fe.g, self.ekf.nis_avg, self.rng)
+                                           self.lidar_fe.map_edt, self.lidar_fe.g, self.ekf.nis_avg, self.rng,
+                                           occ=self.occ)
                     if dg is not None:
                         self._act_on_diagnosis(dg)
                     corr = self.diag.pose_correction(pose)
@@ -263,6 +306,7 @@ class AutonomyStack:
         self.tracker.prune(t)
         tracks = self.tracker.confirmed()
         people_xy = self._occluding_people(tracks)
+        self._update_traffic([tr.x[:2] for tr in tracks if tr.person_like], dt)
         self.items.update_hand_positions({tr.identity: tr.x[:2] for tr in tracks if tr.identity})
         # ---------------- item belief: predict + workflow --------------------
         self.items.predict(dt)
@@ -270,9 +314,15 @@ class AutonomyStack:
             self._on_workflow(ev, t)
         for due, ev in list(self.pending_counts):
             if t >= due:
-                for c in count_claims(ev, [e for e in self.log_seen if e.type != WorkflowEventType.COUNT],
-                                      self.inp.initial_placement, self.inp.duration, self.inp.count_grace):
+                moves = [e for e in self.log_seen if e.type != WorkflowEventType.COUNT]
+                for c in count_claims(ev, moves, self.inp.initial_placement, self.inp.duration,
+                                      self.inp.count_grace):
                     self.verifier.add_claim(c)
+                    # a move of this item reported after the count time but before the
+                    # claim existed: the counted state no longer holds and the robot
+                    # could not snapshot it -> the claim is closed as superseded
+                    if any(e.item_id == c.item_id and e.t > ev.t for e in moves):
+                        self.verifier.supersede(c.id)
                 self.pending_counts.remove((due, ev))
         # ---------------- camera -------------------------------------------
         loc_ok = self.ekf.pos_std < 0.3
@@ -376,6 +426,11 @@ class AutonomyStack:
             self.pending_counts.append((t + 3.0, ev))
             return
         if ev.item_id:
+            # a logged event adds ~1 event/min at its slots for about activity_tau (decaying)
+            for sid, wgt in ((ev.dst, 1.0), (ev.src, 0.5)):
+                k = self.items.sidx.get(sid) if sid else None
+                if k is not None and self.activity_prior[k] > 0:
+                    self.activity[k] += wgt * 60.0 / self.activity_tau
             if self.use_log:
                 self.items.apply_workflow_event(ev.item_id, ev.src, ev.dst, ev.confidence, eid, t)
             self.verifier.note_item_event(ev.item_id, ev.t)
@@ -430,6 +485,15 @@ class AutonomyStack:
                                                   "tags": [x for x in cp.tag if x]}, p_meas)
         self.items.update_camera_classes(pdc, counts, tag_reads, eid, t, glare)
 
+    def _scene_with_people(self) -> RayScene:
+        """Prior map plus the people the robot believes are present (tracked person-like
+        tracks and the scrubbed team at their stations) as occluding cylinders."""
+        ppl = self._occluding_people(self.tracker.confirmed())
+        n = len(ppl)
+        ps = self._prior_scene
+        return RayScene(ps.box_center, ps.box_half, ps.box_yaw, ppl.reshape(-1, 2), np.full(n, 0.25),
+                        np.full(n, 1.75), ps.ceiling)
+
     def _radar_slot_evidence(self, p_meas, static_metal):
         S = len(self.inp.slots)
         pd = np.zeros(S)
@@ -449,8 +513,12 @@ class AutonomyStack:
             cand.append((k, s, r))
         if cand:
             own = np.array([self.metal_prior_idx.get(s.anchor, -99) for k, s, r in cand])
-            blk = segments_blocked(self._prior_scene, np.repeat(origin[None], len(cand), 0),
-                                   np.array([s.position for k, s, r in cand]), own=own, exclude=excl_base,
+            # people block the beam too (a person between the radar and the drape would
+            # otherwise read as "no metal under the drape")
+            scn = self._scene_with_people()
+            excl = np.r_[excl_base, np.zeros(len(scn.cyl_xy), dtype=bool)]
+            blk = segments_blocked(scn, np.repeat(origin[None], len(cand), 0),
+                                   np.array([s.position for k, s, r in cand]), own=own, exclude=excl,
                                    tol=0.15, own_tol=1.0)
             for (k, s, r), b in zip(cand, blk):
                 if b:
@@ -475,7 +543,10 @@ class AutonomyStack:
             s0 = self.inp.slots[ks[0]]
             origin = np.array([pose[0], pose[1], 1.2])
             r = float(np.linalg.norm(s0.position - origin))
-            occl = bool(segment_occluded(self._prior_scene, origin[None], s0.position[None], tol=0.3)[0])
+            # non-line-of-sight: static structure, people in the path, or the echo's own
+            # NLOS indication (multipath arrival structure)
+            occl = bool(segment_occluded(self._scene_with_people(), origin[None], s0.position[None], tol=0.3)[0]) \
+                or bool(echo.path_occluded)
             anchor = next((o for o in self.inp.prior_map if o.name == s0.anchor), None)
             base = MATERIALS[anchor.material].acoustic_reflectivity if anchor else 0.5
             att = (1.0 / (1.0 + 0.3 * r * r)) * (0.45 if occl else 1.0)
@@ -540,7 +611,8 @@ class AutonomyStack:
             if replan:
                 g = self.nbv.plan(pose, self.items, self.occ, cm, people_xy, self.verifier.urgency(t),
                                   self.verifier.urgent_slots(t), self.rng,
-                                  incumbent=None if (self.goal is None or dwell_done) else self.goal)
+                                  incumbent=None if (self.goal is None or dwell_done) else self.goal,
+                                  activity=self.activity_rates(), traffic=self.traffic)
                 if g is not None:
                     if self.goal is None or g is not self.goal:
                         self._arrived_t = None
@@ -570,8 +642,11 @@ class AutonomyStack:
                 regs = [r for r in regs if r[0] < 3.2]
                 probe = min(regs)[1] if regs else None
         # path uncertainty ahead (for the supervisor)
-        path = self.goal.path if self.goal is not None else np.array([pose[:2]])
-        ahead = path[:6] if len(path) else np.array([pose[:2]])
+        # path uncertainty over the next metre of the planned path, measured from
+        # the robot's projection onto it (smoothed paths keep only sparse corner
+        # vertices, and the first vertex is the stale start pose)
+        path = self.goal.path if self.goal is not None and len(self.goal.path) else np.array([pose[:2]])
+        ahead = np.array([lookahead_point(pose[:2], path, d) for d in np.arange(0.1, 1.01, 0.1)])
         self._path_entropy = float(np.mean(self._unc_at(ahead, excess=True)))
         # MPC
         hs = self.tracker.predict_samples(self.mpc.H, self.mpc.dt, 12, self.rng)
@@ -627,7 +702,7 @@ class AutonomyStack:
         return ViewGoal(np.asarray(p, float), path, 0.0, tag, None, {})
 
     def _retreat_cmd(self, pose, tracks):
-        pts = [tr.x[:2] for tr in tracks]
+        pts = [tr.x[:2] for tr in tracks if tr.person_like]
         if not pts:
             return (-0.1, 0.0)
         near = min(pts, key=lambda q: np.linalg.norm(q - pose[:2]))
@@ -636,7 +711,12 @@ class AutonomyStack:
         heading = np.array([np.cos(pose[2]), np.sin(pose[2])])
 
         def clear(xy) -> bool:
-            return self.cm is None or float(self.cm.lookup(xy[None], "edt")[0]) > self.radius + 0.05
+            # free of obstacles *and* outside the sterile keep-out (retreat must never
+            # back into the sterile field)
+            if self.cm is None:
+                return True
+            return float(self.cm.lookup(xy[None], "edt")[0]) > self.radius + 0.05 and \
+                not bool(self.cm.lookup(xy[None], "keepout")[0])
 
         back_ok = clear(pose[:2] - 0.3 * heading)
         front_ok = clear(pose[:2] + 0.3 * heading)

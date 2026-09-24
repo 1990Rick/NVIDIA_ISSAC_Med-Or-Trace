@@ -24,9 +24,17 @@ DIRECTION = {"min_human_clearance_m": 1, "near_collision_rate_per_min": -1, "tas
              "keepout_margin_violation_s": -1, "near_collision_events": -1, "handover_requests": -1}
 
 
-def load_results(path: str | Path) -> list[dict]:
+def load_results(path: str | Path, dedupe: bool = True) -> list[dict]:
+    """Rows of a results.jsonl; with ``dedupe`` a re-run appended for the same
+    (scenario, policy, variant, backend) replaces the earlier row (last wins)."""
     with open(path) as f:
-        return [json.loads(line) for line in f if line.strip()]
+        rows = [json.loads(line) for line in f if line.strip()]
+    if not dedupe:
+        return rows
+    last = {}
+    for i, r in enumerate(rows):
+        last[(r.get("scenario_id"), r.get("policy"), r.get("variant"), r.get("backend"))] = i
+    return [rows[i] for i in sorted(last.values())]
 
 
 def bootstrap_ci(x: np.ndarray, n: int = 2000, alpha: float = 0.05, seed: int = 0) -> tuple[float, float, float]:
@@ -48,10 +56,18 @@ def summarize(rows: list[dict], group_keys=("family", "policy"), metrics=None) -
         rec = dict(zip(group_keys, key))
         rec["n"] = len(rs)
         for m in metrics:
-            mean, lo, hi = bootstrap_ci(np.array([r["metrics"].get(m, np.nan) for r in rs], dtype=float))
+            mean, lo, hi = bootstrap_ci(np.array([_num(r["metrics"].get(m)) for r in rs], dtype=float))
             rec[m] = {"mean": mean, "ci95": [lo, hi]}
         out.append(rec)
     return out
+
+
+def _num(v) -> float:
+    """Metric value as float; None (NaN written to JSON as null), strings and bools-as-missing -> NaN."""
+    try:
+        return float(v) if v is not None else float("nan")
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def paired_delta(rows: list[dict], a: str, b: str, key: str = "policy", metrics=None, seed: int = 0) -> dict:
@@ -64,7 +80,7 @@ def paired_delta(rows: list[dict], a: str, b: str, key: str = "policy", metrics=
     rng = np.random.default_rng(seed)
     res = {"n_pairs": len(common)}
     for m in metrics:
-        d = np.array([by[s][a].get(m, np.nan) - by[s][b].get(m, np.nan) for s in common], dtype=float)
+        d = np.array([_num(by[s][a].get(m)) - _num(by[s][b].get(m)) for s in common], dtype=float)
         d = d[np.isfinite(d)]
         if len(d) == 0:
             res[m] = None

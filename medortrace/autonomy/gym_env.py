@@ -227,6 +227,7 @@ class NbvEnv:
         self.seed = ep_seed
         self.be = make_backend("lite", sim_cfg)
         self.bundle = self.be.reset(ep)
+        self._pose_now = np.asarray(self.be.truth().robot_pose, float)
         self.stack = AutonomyStack(stack_inputs_from_episode(ep), cfg)
         self.hook = _PlannerHook(self.stack.nbv)
         self.stack.nbv = self.hook
@@ -298,9 +299,11 @@ class NbvEnv:
     def _tick(self, terms: dict | None = None) -> None:
         st, be = self.stack, self.be
         cmd = st.step(self.bundle, be.dt)
+        self.truth_log.robot_at_stack.append(self._pose_now)
         self._score_verdicts(st.telemetry[-1].verdicts, terms)
         self.bundle = be.step(cmd)
         tr = be.truth()
+        self._pose_now = np.asarray(tr.robot_pose, float)
         if self.op is not None:
             self.op.step(be.t, st, tr.robot_pose)
         self._log_truth(tr)
@@ -345,7 +348,7 @@ class NbvEnv:
         tl.collision_agent.append(tr.collision_agent)
         tl.collision_static.append(tr.collision_static)
         tl.in_keepout.append(tr.in_keepout)
-        tl.in_keepout_margin.append(bool(self.ep.spec.in_keepout(tr.robot_pose[None, :2])[0]))
+        tl.in_keepout_margin.append(bool(self.ep.spec.in_keepout(tr.robot_pose[None, :2], extra=self.be.rp.radius)[0]))
         tl.battery.append(tr.battery_wh)
         tl.energy.append(tr.energy_used_wh)
         tl.item_slots.append(tr.item_slots)
@@ -391,7 +394,8 @@ class NbvEnv:
             for w in self.preset_weights:
                 inner.w = dict(w)
                 out.append(inner.plan(pose, st.items, st.occ, st.cm, people, urg, urg_slots,
-                                      np.random.default_rng(seed)))
+                                      np.random.default_rng(seed), activity=st.activity_rates(),
+                                      traffic=st.traffic))
         finally:
             inner.w = saved
         return out

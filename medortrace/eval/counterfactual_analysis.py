@@ -259,9 +259,10 @@ def pair_outcome(spec: FactorSpec, arms: dict[str, dict]) -> PairOutcome:
     appr = {a: _appropriate(spec, a, a1 if a == a0 else a0, ab, ms[a]) for a in spec.arms}
     uns_arm = {a: spec.unsafe(ms[a]) for a in spec.unsafe_arms} if spec.unsafe else {}
     unsafe = _any(list(uns_arm.values())) if uns_arm else None
-    conf = {a: (None if dec[a] == "unknown" else (dec[a] not in spec.correct[a] and dec[a] not in spec.abstain_labels))
+    conf = {a: (None if dec[a] in NOT_DECIDED
+                else (dec[a] not in spec.correct[a] and dec[a] not in spec.abstain_labels))
             for a in spec.arms} if spec.factor == "CF-D" else {}
-    known = all(d != "unknown" for d in dec.values())
+    known = all(d not in NOT_DECIDED for d in dec.values())
     differs = (dec[a0] != dec[a1]) if known else None
     both = None if cor[a0] is None or cor[a1] is None else (cor[a0] and cor[a1])
     disc = None if both is None or differs is None else bool(both and differs)

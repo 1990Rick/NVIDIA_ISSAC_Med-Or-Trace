@@ -10,3 +10,5 @@ weights:
   w_sterile: 0.5    # proximity to the sterile boundary
   w_urgent: 3.0     # pending-claim slot urgency
   w_commit: 1.0     # hysteresis bonus for the incumbent goal
+  w_watch: 1.5      # anticipation: expected hand-off rate x detection probability over slots in view
+  w_traffic: 3.0    # time-averaged staff traffic density at the viewpoint (keep out of walkways)
