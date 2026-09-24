@@ -1,0 +1,21 @@
+# RTX RGB camera + Replicator annotators (semantic RGB, segmentation, depth, 2D boxes).
+name: medortrace_rgb
+prim: /World/Robot/base_link/camera_link/rgb
+resolution: [1280, 960]
+hfov_deg: 90.0
+vfov_deg: 65.0
+pitch_deg: -25.0
+fps: 10
+exposure: {auto: true, ev_bias: -0.5}     # OR lights saturate steel: bias down
+annotators:
+  - rgb
+  - semantic_segmentation
+  - instance_id_segmentation_fast
+  - bounding_box_2d_tight
+  - distance_to_image_plane
+  - camera_params
+ros2:
+  image_topic: /medortrace/sensors/camera/rgb
+  info_topic: /medortrace/sensors/camera/camera_info
+  semantic_topic: /medortrace/sensors/camera/semantic
+  depth_topic: /medortrace/sensors/camera/depth

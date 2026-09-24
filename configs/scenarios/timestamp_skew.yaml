@@ -1,0 +1,8 @@
+# Sensor clock offsets and drift (e.g. lost PTP sync, USB camera clock).
+extends: scenarios/default.yaml
+family: timestamp_skew
+faults:
+  timestamp_skew:
+    camera: {offset_s: [0.15, 0.45], drift_ppm: 800}
+    lidar: {offset_s: [0.05, 0.25], drift_ppm: 300}
+    radar: {offset_s: [-0.2, 0.2], drift_ppm: 0}

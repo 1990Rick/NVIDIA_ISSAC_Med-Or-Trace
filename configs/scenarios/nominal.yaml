@@ -1,0 +1,3 @@
+# Nominal OR logistics episode: no injected faults, no hidden-cause manipulation.
+extends: scenarios/default.yaml
+family: nominal

@@ -1,0 +1,7 @@
+# Wheel slip / odometry bias with degraded landmark visibility.
+extends: scenarios/default.yaml
+family: loc_drift
+faults:
+  loc_drift: {v_scale_error: [0.03, 0.08], omega_bias: [0.01, 0.035], start_s: 10.0}
+  dropout_rate_per_min: {landmarks: 2.0}
+  dropout_mean_s: 8.0

@@ -41,7 +41,7 @@ class MpcResult:
 
 
 class MppiController:
-    def __init__(self, horizon: int = 20, dt: float = 0.1, samples: int = 160, lam: float = 1.0,
+    def __init__(self, horizon: int = 20, dt: float = 0.1, samples: int = 120, lam: float = 1.0,
                  sigma=(0.25, 0.6), alpha: float = 0.8, weights: dict | None = None,
                  human_radius: float = 0.3, max_v: float = 0.7, max_w: float = 1.2):
         self.H, self.dt, self.K = horizon, dt, samples
@@ -74,9 +74,7 @@ class MppiController:
         vmax = self.max_v * speed_scale
         # temporally correlated exploration noise: sample 5 knots and interpolate
         knots = rng.normal(0, 1, (K, 5, 2)) * self.sigma
-        tk = np.linspace(0, H - 1, 5)
-        th = np.arange(H)
-        noise = np.stack([np.stack([np.interp(th, tk, knots[k, :, d]) for d in range(2)], -1) for k in range(K)])
+        noise = np.einsum("hk,nkd->nhd", self._interp_matrix(H, 5), knots)
         U = self.U[None] + noise
         # a few straight "go" candidates towards the path direction help cold starts
         U[2:6, :, 0] = np.linspace(0.25, 1.0, 4)[:, None] * vmax
@@ -164,6 +162,16 @@ class MppiController:
                          float(min_clear[best]) if np.isfinite(min_clear[best]) else 10.0,
                          float(coll_frac[best]), float(cvar[best]) if human_samples.size else 0.0,
                          feasible, Xn[0])
+
+    @staticmethod
+    def _interp_matrix(H: int, n_knots: int) -> np.ndarray:
+        tk = np.linspace(0, H - 1, n_knots)
+        M = np.zeros((H, n_knots))
+        for h in range(H):
+            j = min(int(np.searchsorted(tk, h, side="right")) - 1, n_knots - 2)
+            w = (h - tk[j]) / (tk[j + 1] - tk[j])
+            M[h, j], M[h, j + 1] = 1 - w, w
+        return M
 
     def reset(self) -> None:
         self.U[:] = 0.0

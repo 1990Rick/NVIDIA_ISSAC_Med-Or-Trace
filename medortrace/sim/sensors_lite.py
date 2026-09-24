@@ -29,7 +29,7 @@ from medortrace.common.msgs import (
     LandmarkObservation,
     RadarDetection,
 )
-from medortrace.sim.raycast import CEIL_ID, FLOOR_ID, NO_HIT, RayScene, cast, segment_occluded
+from medortrace.sim.raycast import CEIL_ID, FLOOR_ID, NO_HIT, RayScene, cast, segment_occluded, segments_blocked
 from medortrace.world.materials import Material
 
 CLASSES = ["sponge", "clamp", "needle_driver", "specimen", "implant_box"]
@@ -107,16 +107,13 @@ def simulate_lidar(scene: RayScene, obj_materials: list[Material], obj_tags: lis
     tr = valid & (u < trans)
     if tr.any():
         idx = np.where(tr)[0]
-        excl = np.zeros(n_obj, dtype=bool)
-        for i in idx:
-            if 0 <= obj[i] < n_obj:
-                excl[:] = False
-                excl[obj[i]] = True
-                h2 = cast(scene, O[i:i + 1], d_w[i:i + 1], t_max=cfg.max_range, exclude=excl)
-                ranges[i] = h2.t[0]
-                obj[i] = h2.obj[0]
-                refl[i] = refl_tab[lut(obj[i])] * 0.7
-                cos_inc[i] = abs(float(d_w[i] @ h2.normal[0]))
+        # continue through every transmissive object (acrylic) along these rays
+        excl = np.concatenate([trans_tab[:n_obj] > 0.3, np.zeros(0, bool)])
+        h2 = cast(scene, O[idx], d_w[idx], t_max=cfg.max_range, exclude=excl)
+        ranges[idx] = h2.t
+        obj[idx] = h2.obj
+        refl[idx] = refl_tab[lut(h2.obj)] * 0.7
+        cos_inc[idx] = np.abs((d_w[idx] * h2.normal).sum(1))
     # --- specular bounce: mirror-like path unless near-normal incidence ---
     sp = valid & ~tr & (rng.random(R) < spec) & (cos_inc < 0.97)
     if sp.any():
@@ -244,6 +241,7 @@ def simulate_radar(scene: RayScene, obj_materials: list[Material], origin: np.nd
     n_obj = scene.n_boxes + len(scene.cyl_xy)
     penetrable = np.array([obj_materials[i].radar_penetrable for i in range(scene.n_boxes)] +
                           [False] * len(scene.cyl_xy)) if n_obj else np.zeros(0, bool)
+    cand = []
     for tg in targets:
         d = tg["pos"] - origin
         r = float(np.linalg.norm(d))
@@ -252,15 +250,16 @@ def simulate_radar(scene: RayScene, obj_materials: list[Material], origin: np.nd
         az = float((np.arctan2(d[1], d[0]) - yaw + np.pi) % (2 * np.pi) - np.pi)
         if abs(az) > np.deg2rad(cfg.fov_deg) / 2:
             continue
-        excl = penetrable.copy()
-        if tg.get("self_index") is not None:
-            excl[tg["self_index"]] = True
-        through_fabric = False
-        blocked = segment_occluded(scene, origin[None], tg["pos"][None], exclude=excl, tol=0.15)[0]
-        if blocked:
+        cand.append((tg, d, r, az))
+    if cand:
+        ends = np.array([c[0]["pos"] for c in cand])
+        own = np.array([c[0].get("self_index") if c[0].get("self_index") is not None else -99 for c in cand])
+        blocked = segments_blocked(scene, np.repeat(origin[None], len(cand), 0), ends, own=own,
+                                   exclude=penetrable, tol=0.15, own_tol=1.0)
+    for (tg, d, r, az), blk in zip(cand, blocked if cand else []):
+        if blk:
             continue
-        if tg.get("behind_fabric"):
-            through_fabric = True
+        through_fabric = bool(tg.get("behind_fabric"))
         # radar equation: SNR ~ RCS / r^4
         snr_db = tg["rcs_dbsm"] - 40 * np.log10(max(r, 0.5)) + 35.0 - (6.0 if through_fabric else 0.0)
         p_det = 1 / (1 + np.exp(-(snr_db - 3.0) / 2.0))
@@ -307,16 +306,20 @@ def simulate_acoustic(scene: RayScene, origin: np.ndarray, region: str, region_p
 def simulate_landmarks(scene: RayScene, origin: np.ndarray, yaw: float, landmarks: list, rng: np.random.Generator,
                        max_range: float = 8.0, r_sigma: float = 0.03, b_sigma: float = 0.01) -> list[LandmarkObservation]:
     obs = []
+    cand = []
     for lm in landmarks:
         d = lm.position - origin
         r = float(np.linalg.norm(d[:2]))
         if r > max_range:
             continue
-        # wall tags: pull the endpoint 5 cm off the wall to avoid self-occlusion
-        tgt = lm.position - 0.08 * d / (np.linalg.norm(d) + 1e-9)
-        if segment_occluded(scene, origin[None], tgt[None], tol=0.05)[0]:
-            continue
-        if rng.random() > 0.9:
+        cand.append((lm, d, r))
+    if not cand:
+        return obs
+    # wall tags: pull the endpoint 8 cm off the wall to avoid self-occlusion
+    ends = np.array([lm.position - 0.08 * d / (np.linalg.norm(d) + 1e-9) for lm, d, r in cand])
+    blocked = segments_blocked(scene, np.repeat(origin[None], len(cand), 0), ends, tol=0.05)
+    for (lm, d, r), blk in zip(cand, blocked):
+        if blk or rng.random() > 0.9:
             continue
         b = float((np.arctan2(d[1], d[0]) - yaw + np.pi) % (2 * np.pi) - np.pi)
         obs.append(LandmarkObservation(lm.id, r + float(rng.normal(0, r_sigma)), b + float(rng.normal(0, b_sigma))))

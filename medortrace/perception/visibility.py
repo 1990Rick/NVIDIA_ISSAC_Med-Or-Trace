@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from medortrace.belief.occupancy import OccupancyBelief
-from medortrace.sim.raycast import RayScene, segment_occluded
+from medortrace.sim.raycast import RayScene, segments_blocked
 from medortrace.world.scene import SceneObject, Slot
 
 CLASS_SIZE = {"sponge": 0.1, "clamp": 0.16, "needle_driver": 0.18, "specimen": 0.08, "implant_box": 0.25}
@@ -77,14 +77,15 @@ class VisibilityModel:
         pts = np.array(pts)
         owners = np.array(owners)
         scn = self.scene(people_xy)
-        blocked = np.zeros(len(pts), dtype=bool)
-        n_people = len(people_xy)
+        own = np.full(len(pts), -99)
         for k in cand:
             m = owners == k
-            ex = np.concatenate([self.anchor_excl[k], np.zeros(n_people, dtype=bool)])
+            a_idx = np.where(self.anchor_excl[k])[0]
+            if len(a_idx):
+                own[m] = a_idx[0]
             if hand_owner and k in hand_owner and hand_owner[k] is not None:
-                ex[len(self.objs) + hand_owner[k]] = True
-            blocked[m] = segment_occluded(scn, np.repeat(cam[None], m.sum(), 0), pts[m], exclude=ex)
+                own[m] = len(self.objs) + hand_owner[k]
+        blocked = segments_blocked(scn, np.repeat(cam[None], len(pts), 0), pts, own=own)
         if occ is not None:
             blocked |= occ.blocked_segments(np.repeat(cam[None], len(pts), 0), pts)
         for k in cand:

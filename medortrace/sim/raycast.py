@@ -57,35 +57,46 @@ def cast(scene: RayScene, O: np.ndarray, Dr: np.ndarray, t_max: float = 30.0,
         return RayHits(best_t, best_o, best_n)
     if B:
         cy, sy = np.cos(-scene.box_yaw), np.sin(-scene.box_yaw)                  # (B,)
-        p = O[:, None, :] - scene.box_center[None]                                # R,B,3
-        px = cy * p[..., 0] - sy * p[..., 1]
-        py = sy * p[..., 0] + cy * p[..., 1]
-        dx = cy[None] * Dr[:, None, 0] - sy[None] * Dr[:, None, 1]
-        dy = sy[None] * Dr[:, None, 0] + cy[None] * Dr[:, None, 1]
-        dz = np.broadcast_to(Dr[:, None, 2], dx.shape)
-        P = np.stack([px, py, p[..., 2]], -1)
-        Dl = np.stack([dx, dy, dz], -1)
-        Dl = np.where(np.abs(Dl) < eps, eps, Dl)
-        h = scene.box_half[None]
-        t1 = (-h - P) / Dl
-        t2 = (h - P) / Dl
-        tn = np.minimum(t1, t2)
-        tf = np.maximum(t1, t2)
-        tmin = tn.max(-1)
-        tmax = tf.min(-1)
+        ox = O[:, 0:1] - scene.box_center[None, :, 0]
+        oy = O[:, 1:2] - scene.box_center[None, :, 1]
+        pz = O[:, 2:3] - scene.box_center[None, :, 2]
+        px = cy * ox - sy * oy
+        py = sy * ox + cy * oy
+        dx = cy[None] * Dr[:, 0:1] - sy[None] * Dr[:, 1:2]
+        dy = sy[None] * Dr[:, 0:1] + cy[None] * Dr[:, 1:2]
+        dz = np.broadcast_to(Dr[:, 2:3], dx.shape)
+        tmin = np.full(dx.shape, -np.inf)
+        tmax = np.full(dx.shape, np.inf)
+        axis_of_min = np.zeros(dx.shape, dtype=np.int8)
+        sign_of_min = np.zeros(dx.shape)
+        for a, (pp, dd) in enumerate(((px, dx), (py, dy), (pz, dz))):
+            h = scene.box_half[None, :, a]
+            dd = np.where(np.abs(dd) < eps, eps, dd)
+            inv = 1.0 / dd
+            t1 = (-h - pp) * inv
+            t2 = (h - pp) * inv
+            tn = np.minimum(t1, t2)
+            tf = np.maximum(t1, t2)
+            upd = tn > tmin
+            tmin = np.where(upd, tn, tmin)
+            axis_of_min = np.where(upd, a, axis_of_min)
+            sign_of_min = np.where(upd, -np.sign(dd), sign_of_min)
+            tmax = np.minimum(tmax, tf)
         hit = (tmax >= np.maximum(tmin, 0.0)) & (tmin > 1e-4) & (tmin < t_max)
         if exclude is not None:
             hit &= ~exclude[None, :B]
         tb = np.where(hit, tmin, np.inf)
         bi = tb.argmin(1)
-        bt = tb[np.arange(R), bi]
+        ar = np.arange(R)
+        bt = tb[ar, bi]
         ok = np.isfinite(bt)
         if ok.any():
             r_ok = np.where(ok)[0]
             b_ok = bi[ok]
-            ax = tn[r_ok, b_ok].argmax(-1)
+            ax = axis_of_min[r_ok, b_ok]
+            sg = sign_of_min[r_ok, b_ok]
             nl = np.zeros((len(r_ok), 3))
-            nl[np.arange(len(r_ok)), ax] = -np.sign(Dl[r_ok, b_ok, ax])
+            nl[np.arange(len(r_ok)), ax] = sg
             yw = scene.box_yaw[b_ok]
             cw, sw = np.cos(yw), np.sin(yw)
             nw = np.stack([cw * nl[:, 0] - sw * nl[:, 1], sw * nl[:, 0] + cw * nl[:, 1], nl[:, 2]], 1)
@@ -140,4 +151,26 @@ def segment_occluded(scene: RayScene, a: np.ndarray, b: np.ndarray, exclude: np.
     Dr = d / (L[:, None] + 1e-12)
     h = cast(scene, a, Dr, t_max=float(L.max()) + 1.0 if len(L) else 1.0, exclude=exclude)
     blocked = (h.t < L - tol) & (h.obj != FLOOR_ID)
+    return blocked
+
+
+def segments_blocked(scene: RayScene, a: np.ndarray, b: np.ndarray, own: np.ndarray | None = None,
+                     exclude: np.ndarray | None = None, tol: float = 0.05, own_tol: float = 0.6) -> np.ndarray:
+    """Batched occlusion test for many segments with per-segment "own" objects.
+
+    One vectorised cast for all segments.  A segment is blocked if the first
+    hit lies before its end point (minus ``tol``), unless that first hit is the
+    segment's own object (``own[i]``, e.g. the table an item rests on or the
+    person holding it) within ``own_tol`` of the end point.  ``exclude`` is a
+    global mask of objects that are transparent for every segment.
+    """
+    if len(a) == 0:
+        return np.zeros(0, dtype=bool)
+    d = b - a
+    L = np.linalg.norm(d, axis=1)
+    Dr = d / (L[:, None] + 1e-12)
+    h = cast(scene, a, Dr, t_max=float(L.max()) + 1.0, exclude=exclude)
+    blocked = (h.t < L - tol) & (h.obj != FLOOR_ID)
+    if own is not None:
+        blocked &= ~((h.obj == own) & (h.t > L - own_tol))
     return blocked

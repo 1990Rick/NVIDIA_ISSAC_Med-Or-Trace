@@ -1,0 +1,13 @@
+# PhysX-based proprioceptive sensors (ground-truth supervision for locomotion/manipulation).
+imu:
+  prim: /World/Robot/base_link/imu_link
+  rate_hz: 100
+  accel_noise_density: 0.002       # m/s^2/sqrt(Hz)
+  gyro_noise_density: 0.0003       # rad/s/sqrt(Hz)
+  linear_acceleration_filter_size: 4
+contact:
+  bumper: {prim: /World/Robot/base_link, threshold_n: 1.0, radius_m: 0.3}
+  gripper: {prim: /World/Robot/gripper, threshold_n: 0.5}
+effort:
+  joints: [/World/Robot/joints/arm_shoulder, /World/Robot/joints/gripper_jaw,
+           /World/Robot/joints/left_wheel_joint, /World/Robot/joints/right_wheel_joint]

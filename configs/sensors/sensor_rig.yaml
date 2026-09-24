@@ -1,0 +1,30 @@
+# Human-editable RTX sensor definitions.  `scripts/generate_rtx_configs.py`
+# turns these into the JSON profiles loaded by Isaac Sim's RTX sensor pipeline.
+lidar:
+  name: MedOrTrace_OR16
+  channels: 16
+  elevation_deg: [-15.0, 15.0]
+  azimuth_resolution_deg: 0.2
+  scan_rate_hz: 10.0
+  near_range_m: 0.2
+  far_range_m: 30.0
+  range_resolution_m: 0.004
+  range_accuracy_m: 0.02
+  wavelength_nm: 905.0
+  max_returns: 2            # dual return: needed to see through acrylic / catch multipath
+  min_reflectance: 0.05
+  min_reflectance_range_m: 20.0
+  avg_power_w: 0.002
+  pulse_time_ns: 6
+radar:
+  name: MedOrTrace_77GHz_SRR
+  carrier_ghz: 77.0
+  bandwidth_ghz: 4.0        # -> ~3.75 cm range resolution
+  max_range_m: 15.0
+  fov_azimuth_deg: 120.0
+  fov_elevation_deg: 30.0
+  range_resolution_m: 0.0375
+  velocity_resolution_mps: 0.05
+  max_velocity_mps: 8.0
+  azimuth_resolution_deg: 2.0
+  frame_rate_hz: 10.0

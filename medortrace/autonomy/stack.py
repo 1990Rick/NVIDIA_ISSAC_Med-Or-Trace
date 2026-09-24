@@ -47,7 +47,7 @@ from medortrace.planning.routes import fixed_route, passive_vantage
 from medortrace.provenance.graph import ProvenanceGraph
 from medortrace.provenance.verifier import ClaimVerifier
 from medortrace.safety.supervisor import Envelope, Mode, SafetyInputs, SafetySupervisor
-from medortrace.sim.raycast import RayScene, segment_occluded
+from medortrace.sim.raycast import RayScene, segment_occluded, segments_blocked
 from medortrace.world.materials import MATERIALS
 from medortrace.world.scene import ItemSpec, Landmark, SceneObject, Slot, StaffSpec, SterileZone
 from medortrace.world.workflow import count_claims, handoff_claim
@@ -387,6 +387,7 @@ class AutonomyStack:
         origin = np.array([p_meas[0], p_meas[1], self.radar_h])
         excl_base = np.array([MATERIALS[o.material].radar_penetrable for o in self.inp.prior_map])
         pos = np.array([s.position if np.all(np.isfinite(s.position)) else [1e3, 1e3, 1e3] for s in self.inp.slots])
+        cand = []
         for k, s in enumerate(self.inp.slots):
             if s.kind not in ("under_drape", "floor") or not np.all(np.isfinite(s.position)):
                 continue
@@ -395,13 +396,17 @@ class AutonomyStack:
             az = wrap_angle(np.arctan2(d[1], d[0]) - p_meas[2])
             if r > 12.0 or abs(az) > np.deg2rad(60):
                 continue
-            ex = excl_base.copy()
-            if s.anchor in self.metal_prior_idx:
-                ex[self.metal_prior_idx[s.anchor]] = True
-            if segment_occluded(self._prior_scene, origin[None], s.position[None], exclude=ex, tol=0.15)[0]:
-                continue
-            snr = -12.0 - 40 * np.log10(max(r, 0.5)) + 35.0 - (6.0 if s.kind == "under_drape" else 0.0)
-            pd[k] = min(1 / (1 + np.exp(-(snr - 3.0) / 2.0)), 0.95) / max(self.items.radar_pd, 1e-3)
+            cand.append((k, s, r))
+        if cand:
+            own = np.array([self.metal_prior_idx.get(s.anchor, -99) for k, s, r in cand])
+            blk = segments_blocked(self._prior_scene, np.repeat(origin[None], len(cand), 0),
+                                   np.array([s.position for k, s, r in cand]), own=own, exclude=excl_base,
+                                   tol=0.15, own_tol=1.0)
+            for (k, s, r), b in zip(cand, blk):
+                if b:
+                    continue
+                snr = -12.0 - 40 * np.log10(max(r, 0.5)) + 35.0 - (6.0 if s.kind == "under_drape" else 0.0)
+                pd[k] = min(1 / (1 + np.exp(-(snr - 3.0) / 2.0)), 0.95) / max(self.items.radar_pd, 1e-3)
         # associate each static metallic return to its nearest slot of any kind;
         # only returns whose nearest slot is an evidence slot count as hits
         for xy, z in static_metal:
